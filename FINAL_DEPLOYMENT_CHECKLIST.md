@@ -54,7 +54,13 @@ VITE_SUPABASE_URL
 VITE_SUPABASE_ANON_KEY
 GEMINI_API_KEY
 GROQ_API_KEY
+SERPAPI_KEY
 ```
+
+> `SERPAPI_KEY` is **server-side only** — do NOT prefix it with `VITE_` and never
+> expose it to the client bundle. It powers `api/trends-refresh.ts` (Google Trends
+> TIMESERIES + GEO_MAP + RELATED_QUERIES). If unset, the app stays on cached
+> snapshots and never crashes. Free tier = 100 calls/month, so refresh sparingly.
 
 9. Deploy to production.
 
@@ -85,9 +91,11 @@ VITE_SUPABASE_URL
 VITE_SUPABASE_ANON_KEY
 GEMINI_API_KEY
 GROQ_API_KEY
+SERPAPI_KEY
 ```
 
-`GROQ_API_KEY` is required only if used.
+`GROQ_API_KEY` is required only if used. `SERPAPI_KEY` is server-side only
+(never prefix with `VITE_`); leave it unset to stay on cached trend snapshots.
 
 Test after deploy:
 

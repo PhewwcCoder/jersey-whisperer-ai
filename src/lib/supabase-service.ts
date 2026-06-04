@@ -2,6 +2,12 @@ import type { ForecastResult } from "./forecast";
 import { forecastProduct } from "./forecast";
 import { seedProducts } from "./seed-data";
 import { getSupabaseClient } from "./supabase";
+import {
+  emptyMarketDiscovery,
+  scoreRising,
+  scoreTop,
+  type MarketDiscovery,
+} from "./market-signals";
 import { localTrendSignals, type LocalTrendSignal } from "./trend-signals";
 import type { Product, Variant } from "./types";
 
@@ -83,7 +89,7 @@ function sanitizeProduct(candidate: Partial<Product> & { id?: string }): Product
     font_name: candidate.font_name ?? "",
     has_print: candidate.has_print ?? true,
     patch_available: candidate.patch_available ?? false,
-    season_year: Number.isFinite(candidate.season_year) ? candidate.season_year : 2026,
+    season_year: typeof candidate.season_year === "number" ? candidate.season_year : 2026,
     kit_type: candidate.kit_type ?? "Home",
     edition_type: candidate.edition_type ?? "Player Edition",
     manufacturing_type: candidate.manufacturing_type ?? "Imported",
@@ -309,13 +315,17 @@ export async function deleteProductFromSupabase(productId: string) {
   }, false);
 }
 
-export async function fetchTrendSignalsFromSupabase(): Promise<StoredTrendSignal[]> {
+export async function fetchTrendSignalsFromSupabase(
+  geo = "BD",
+): Promise<StoredTrendSignal[]> {
   return withSupabaseTimeout("fetch trend signals", async () => {
     const supabase = await getSupabaseClient();
     if (!supabase) return [];
+    // Per-geo cache read: only this market's cached momentum rows.
     const { data, error } = await supabase
       .from("trend_signals")
       .select("*")
+      .eq("geo", geo)
       .order("fetched_at", { ascending: false });
 
     if (error) throw error;
@@ -335,6 +345,78 @@ export async function fetchTrendSignalsFromSupabase(): Promise<StoredTrendSignal
       source: (row.source as string) || undefined,
       fetched_at: (row.fetched_at as string) || undefined,
     }));
+  }, []);
+}
+
+// Reads market-discovery rows (GEO_MAP + RELATED_QUERIES) for one geo, written by
+// api/trends-refresh. Returns an EMPTY (non-live) result when that geo has no cached rows —
+// the caller decides whether to show the demo snapshot (DEMO_GEO only) or an empty-state.
+export async function fetchMarketDiscoveryFromSupabase(geo = "BD"): Promise<MarketDiscovery> {
+  return withSupabaseTimeout<MarketDiscovery>(
+    "fetch market discovery",
+    async () => {
+      const supabase = await getSupabaseClient();
+      if (!supabase) return emptyMarketDiscovery;
+
+      const { data, error } = await supabase
+        .from("market_discovery")
+        .select("*")
+        .eq("geo", geo)
+        .order("score", { ascending: false });
+
+      if (error) throw error;
+      if (!data || !data.length) return emptyMarketDiscovery;
+
+      const geoSignals: MarketDiscovery["geo"] = [];
+      const related: MarketDiscovery["related"] = [];
+      let fetchedAt: string | undefined;
+
+      for (const row of data) {
+        const kind = row.kind as string;
+        const rawValue = safeNumber(row.raw_value, 0);
+        const rowFetchedAt = (row.fetched_at as string) || undefined;
+        if (rowFetchedAt && (!fetchedAt || rowFetchedAt > fetchedAt)) fetchedAt = rowFetchedAt;
+
+        if (kind === "geo_map") {
+          geoSignals.push({
+            team: (row.team as string) || "",
+            location: (row.label as string) || "",
+            value: rawValue,
+            score: safeNumber(row.score, rawValue / 100),
+          });
+        } else if (kind === "related_top" || kind === "related_rising") {
+          const bucket = kind === "related_rising" ? "rising" : "top";
+          related.push({
+            query: (row.label as string) || "",
+            value: rawValue,
+            score: safeNumber(
+              row.score,
+              bucket === "rising" ? scoreRising(rawValue) : scoreTop(rawValue),
+            ),
+            bucket,
+          });
+        }
+      }
+
+      // Per-geo, live: return exactly what this geo has cached (no cross-geo backfill — an
+      // empty feature renders its own empty-state, not another market's demo data).
+      return { live: true, fetchedAt, geo: geoSignals, related };
+    },
+    emptyMarketDiscovery,
+  );
+}
+
+export async function fetchNewsEventsFromSupabase(): Promise<import("./news-score").NewsEvent[]> {
+  return withSupabaseTimeout("fetch news events", async () => {
+    const supabase = await getSupabaseClient();
+    if (!supabase) return [];
+    const { data, error } = await supabase
+      .from("news_events")
+      .select("*")
+      .order("event_date", { ascending: false })
+      .limit(100);
+    if (error) throw error;
+    return (data ?? []) as import("./news-score").NewsEvent[];
   }, []);
 }
 
@@ -413,8 +495,8 @@ export async function saveForecastScoreToSupabase(
       demand_spike_score: scoreObject.demandSpikeScore,
       urgency_label: scoreObject.urgencyLabel,
       trend_score: scoreObject.breakdown.marketTrend,
-      query_score: scoreObject.breakdown.customerQueries,
-      stock_risk_score: scoreObject.breakdown.stockReductionRate,
+      query_score: scoreObject.breakdown.customerConversation,
+      stock_risk_score: scoreObject.breakdown.stockReductionVelocity,
       margin_score: scoreObject.breakdown.profitMargin,
       sales_velocity_score: scoreObject.breakdown.sportsNews,
       recommendation: scoreObject.recommendation,

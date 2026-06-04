@@ -1,4 +1,5 @@
-import { getBestTrendForProduct, getTrendScoreForProduct } from "./trend-signals";
+import { getBestTrendForProduct, getTrendScoreForProduct, type LocalTrendSignal } from "./trend-signals";
+import { computeNewsScore, type NewsEvent } from "./news-score";
 import type { Product, TrendSignal, Variant } from "./types";
 
 type UrgencyLabel =
@@ -19,11 +20,10 @@ export interface ForecastResult {
   urgencyLabel: UrgencyLabel;
   urgencyColor: string;
   breakdown: {
+    customerConversation: number;
     marketTrend: number;
+    stockReductionVelocity: number;
     sportsNews: number;
-    customerQueries: number;
-    competitorAd: number;
-    stockReductionRate: number;
     profitMargin: number;
   };
   matchedTrendKeyword?: string;
@@ -86,26 +86,71 @@ function getStockReductionRate(stock: number) {
   return 0.2;
 }
 
-function getCompetitorAdScore(product: Product) {
-  const text =
-    `${product.team_country_club} ${product.player_name ?? ""} ${product.font_name ?? ""}`.toLowerCase();
-  if (text.includes("argentina") || text.includes("messi")) return 0.9;
-  if (text.includes("portugal") || text.includes("ronaldo") || text.includes("cristiano")) return 0.8;
-  if (text.includes("real madrid") || text.includes("mbappe")) return 0.78;
-  if (text.includes("brazil") || text.includes("neymar")) return 0.68;
-  if (text.includes("barcelona")) return 0.58;
-  return 0.45;
+// Compute S_customer: recency-weighted conversation score (queries + confirmed sales).
+// RawC = sum of w * exp(-lambda * age_in_days)
+//   w_query=1, w_confirmed_sale=6, lambda=0.0495 (14-day half-life: ln(2)/14)
+// S_customer = RawC / (RawC + kappa), where kappa = median RawC across catalog.
+// For DEMO: confirmed sale recorded when seller taps "Confirm order" button.
+// TODO: production = NLP detect seller confirmation phrases (EN/Banglish/Bangla:
+//       "confirmed","ok vai confirmed","apnar payment hoyeche","পেমেন্ট হয়েছে") +
+//       bKash/Nagad mention.
+// Defaults to 0 (no demand signal) if no events.
+function computeCustomerConversationScore(
+  product: Product,
+  allProducts: Product[],
+  now: number = Date.now(),
+) {
+  const LAMBDA = 0.0495; // ln(2) / 14
+  const events = product.events ?? [];
+
+  let rawC = 0;
+  for (const event of events) {
+    const ageMs = now - event.timestamp;
+    const ageDays = ageMs / 86400000;
+    const weight = event.type === "confirmed_sale" ? 6 : 1;
+    rawC += weight * Math.exp(-LAMBDA * ageDays);
+  }
+
+  // Compute median rawC across all products
+  const allRawCs = allProducts
+    .map((p) => {
+      const evts = p.events ?? [];
+      let rc = 0;
+      for (const e of evts) {
+        const ageMs = now - e.timestamp;
+        const ageDays = ageMs / 86400000;
+        const w = e.type === "confirmed_sale" ? 6 : 1;
+        rc += w * Math.exp(-LAMBDA * ageDays);
+      }
+      return rc;
+    })
+    .sort((a, b) => a - b);
+
+  let kappa = 5; // default fallback
+  if (allRawCs.length > 0) {
+    const mid = Math.floor(allRawCs.length / 2);
+    kappa = allRawCs.length % 2 === 0
+      ? (allRawCs[mid - 1] + allRawCs[mid]) / 2
+      : allRawCs[mid];
+    if (kappa === 0) kappa = 5;
+  }
+
+  return clamp01(rawC / (rawC + kappa));
 }
 
-function getSportsNewsScore(product: Product) {
-  const text =
-    `${product.team_country_club} ${product.player_name ?? ""} ${product.font_name ?? ""}`.toLowerCase();
-  if (text.includes("portugal") || text.includes("ronaldo") || text.includes("cristiano")) return 0.88;
-  if (text.includes("argentina") || text.includes("messi")) return 0.86;
-  if (text.includes("brazil") || text.includes("neymar")) return 0.72;
-  if (text.includes("real madrid") || text.includes("mbappe")) return 0.74;
-  if (text.includes("barcelona")) return 0.6;
-  return 0.5;
+// Compute S_stock: stock reduction velocity (days-of-supply).
+// avg_daily_depletion = units_sold_trailing_14d / 14
+// DoS = stock_now / max(avg_daily_depletion, 1e-6)
+// S_stock = clamp(1 - DoS/14, 0, 1)  [DoS_target = 14 days cover]
+// Fallback to old proxy if units_sold unavailable.
+function computeStockReductionVelocity(product: Product) {
+  const variants = safeVariants(product);
+  const stock = sumStock(variants);
+
+  // TODO: production = track units_sold_trailing_14d from order history.
+  // For DEMO: fall back to the old stock-reduction proxy.
+  const oldReduction = getStockReductionRate(stock);
+  return oldReduction;
 }
 
 function getDemandLabel(score: number): ForecastResult["demand"] {
@@ -159,11 +204,11 @@ function inferTrendSignalFromScore(score: number): TrendSignal {
   return "None";
 }
 
-function estimateRecentSales(product: Product, recentInquiries: number) {
+function estimateRecentSales(product: Product, recentInquiries: number, signals?: LocalTrendSignal[]) {
   const popularity = Number.isFinite(product.popularity_score)
     ? (product.popularity_score as number) / 100
     : 0.45;
-  const marketTrend = getTrendScoreForProduct(product);
+  const marketTrend = getTrendScoreForProduct(product, signals);
   return Math.min(
     10,
     Math.max(0, Math.round(recentInquiries * 0.35 + popularity * 3 + marketTrend * 2)),
@@ -206,23 +251,19 @@ function buildReasons(
   score: ReturnType<typeof calculateDemandSpikeScore>,
   product: Product,
   stock: number,
-  recentInquiries: number,
 ) {
   const reasons: string[] = [];
+  if (score.breakdown.customerConversation >= 0.6) {
+    reasons.push("Customer conversation is active (queries + confirmed sales).");
+  }
   if (score.breakdown.marketTrend >= 0.7) {
-    reasons.push("Market trend demand is active in Bangladesh searches.");
+    reasons.push("Market trend demand is active in live SerpApi data.");
+  }
+  if (score.breakdown.stockReductionVelocity >= 0.7) {
+    reasons.push("Stock reduction velocity indicates strong turnover.");
   }
   if (score.breakdown.sportsNews >= 0.7) {
     reasons.push("Sports/news attention is rising around this team/player.");
-  }
-  if (score.breakdown.customerQueries >= 0.6) {
-    reasons.push("Customer queries are active for this product or size.");
-  }
-  if (score.breakdown.competitorAd >= 0.7) {
-    reasons.push("Competitor/ad activity is strong around this category.");
-  }
-  if (stock <= 5) {
-    reasons.push("Stock movement suggests risk of missed sales.");
   }
   if (score.breakdown.profitMargin >= 0.5) {
     reasons.push("Profit margin is healthy enough to justify stronger focus.");
@@ -237,27 +278,24 @@ export function calculateDemandSpikeScore(
   product: Product,
   recentInquiries: number,
   recentSales: number,
+  signals?: LocalTrendSignal[],
+  allProducts: Product[] = [],
+  newsEvents: NewsEvent[] = [],
 ) {
   const variants = safeVariants(product);
   const stock = sumStock(variants);
   const averageMargin = getAverageMargin(variants);
-  const bestTrend = getBestTrendForProduct(product);
+  const bestTrend = getBestTrendForProduct(product, signals);
 
-  const marketTrend = clamp01(getTrendScoreForProduct(product));
-  const sportsNews = clamp01(getSportsNewsScore(product));
-  const customerQueries = clamp01(recentInquiries / 15);
-  const competitorAd = clamp01(getCompetitorAdScore(product));
-  const stockReductionRate = clamp01(getStockReductionRate(stock));
-  const profitMargin = clamp01(averageMargin / 0.5);
+  // New DSS model: DSS = 100 * (0.32*S_customer + 0.25*S_trend + 0.20*S_stock + 0.15*S_news + 0.08*S_margin)
+  const sCustomer = computeCustomerConversationScore(product, allProducts);
+  const sTrend = clamp01(getTrendScoreForProduct(product, signals));
+  const sStock = computeStockReductionVelocity(product);
+  const sNews = clamp01(computeNewsScore(product, newsEvents));
+  const sMargin = clamp01(averageMargin / 0.5);
 
   const demandSpikeScore = Math.round(
-    (marketTrend * 0.3 +
-      sportsNews * 0.15 +
-      customerQueries * 0.25 +
-      competitorAd * 0.15 +
-      stockReductionRate * 0.1 +
-      profitMargin * 0.05) *
-      100,
+    (0.32 * sCustomer + 0.25 * sTrend + 0.20 * sStock + 0.15 * sNews + 0.08 * sMargin) * 100,
   );
 
   const urgency = getUrgency(demandSpikeScore);
@@ -274,32 +312,36 @@ export function calculateDemandSpikeScore(
     urgencyLabel: urgency.label,
     urgencyColor: urgency.color,
     breakdown: {
-      marketTrend,
-      sportsNews,
-      customerQueries,
-      competitorAd,
-      stockReductionRate,
-      profitMargin,
+      customerConversation: sCustomer,
+      marketTrend: sTrend,
+      stockReductionVelocity: sStock,
+      sportsNews: sNews,
+      profitMargin: sMargin,
     },
     matchedTrendKeyword: bestTrend?.keyword,
     recommendation,
   };
 }
 
-export function forecastProduct(product: Product): ForecastResult {
+export function forecastProduct(
+  product: Product,
+  signals?: LocalTrendSignal[],
+  allProducts: Product[] = [],
+  newsEvents: NewsEvent[] = [],
+): ForecastResult {
   const variants = safeVariants(product);
   const stock = sumStock(variants);
   const recentInquiries = Number.isFinite(product.query_count)
     ? (product.query_count as number)
     : 0;
-  const recentSales = estimateRecentSales(product, recentInquiries);
-  const dss = calculateDemandSpikeScore(product, recentInquiries, recentSales);
-  const bestTrend = getBestTrendForProduct(product);
+  const recentSales = estimateRecentSales(product, recentInquiries, signals);
+  const dss = calculateDemandSpikeScore(product, recentInquiries, recentSales, signals, allProducts, newsEvents);
+  const bestTrend = getBestTrendForProduct(product, signals);
   const averageMargin = getAverageMargin(variants);
-  const trendScore = getTrendScoreForProduct(product);
+  const trendScore = getTrendScoreForProduct(product, signals);
   const action = getAction(dss.demandSpikeScore, stock);
   const suggestedRestockQuantity = getSuggestedRestockQuantity(dss.demandSpikeScore, stock);
-  const sellerReasons = buildReasons(dss, product, stock, recentInquiries);
+  const sellerReasons = buildReasons(dss, product, stock);
 
   return {
     product_id: product.id,

@@ -29,6 +29,21 @@ create table if not exists public.trend_signals (
   fetched_at timestamptz default now()
 );
 
+-- Market-discovery signals from SerpApi Google Trends (GEO_MAP + RELATED_QUERIES).
+-- Kept SEPARATE from trend_signals so geo-region / related-query rows never leak
+-- into per-product DSS scoring. One table, discriminated by `kind`.
+create table if not exists public.market_discovery (
+  id uuid primary key default gen_random_uuid(),
+  kind text not null,                       -- 'geo_map' | 'related_top' | 'related_rising'
+  team text,                                -- team for geo_map; null for related queries
+  label text not null,                      -- region/location (geo_map) or query text (related)
+  score numeric,                            -- normalized 0..1 (S_geo / S_top / S_rising)
+  raw_value integer,                        -- SerpApi extracted_value (0..100, or breakout)
+  geo text,                                 -- market scope: '' = worldwide, 'BD' = Bangladesh
+  source text default 'serpapi_google_trends',
+  fetched_at timestamptz default now()
+);
+
 create table if not exists public.forecast_scores (
   id uuid primary key default gen_random_uuid(),
   product_id uuid references public.products(id) on delete cascade,
@@ -126,6 +141,7 @@ $$;
 
 create index if not exists products_team_idx on public.products(team);
 create index if not exists trend_signals_keyword_idx on public.trend_signals(keyword);
+create index if not exists market_discovery_kind_idx on public.market_discovery(kind);
 create index if not exists product_embeddings_embedding_hnsw_idx
   on public.product_embeddings using hnsw (embedding extensions.vector_cosine_ops);
 create index if not exists trend_embeddings_embedding_hnsw_idx
@@ -133,6 +149,7 @@ create index if not exists trend_embeddings_embedding_hnsw_idx
 
 alter table public.products enable row level security;
 alter table public.trend_signals enable row level security;
+alter table public.market_discovery enable row level security;
 alter table public.forecast_scores enable row level security;
 alter table public.chat_logs enable row level security;
 alter table public.product_embeddings enable row level security;
@@ -144,6 +161,10 @@ create policy "hackathon_products_all" on public.products
 
 drop policy if exists "hackathon_trend_signals_all" on public.trend_signals;
 create policy "hackathon_trend_signals_all" on public.trend_signals
+  for all to anon using (true) with check (true);
+
+drop policy if exists "hackathon_market_discovery_all" on public.market_discovery;
+create policy "hackathon_market_discovery_all" on public.market_discovery
   for all to anon using (true) with check (true);
 
 drop policy if exists "hackathon_forecast_scores_all" on public.forecast_scores;

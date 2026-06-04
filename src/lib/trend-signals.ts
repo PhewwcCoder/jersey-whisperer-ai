@@ -185,8 +185,11 @@ function keywordMatchStrength(product: Product, trend: LocalTrendSignal) {
   return score;
 }
 
-export function getMatchingTrendsForProduct(product: Product) {
-  return localTrendSignals
+export function getMatchingTrendsForProduct(
+  product: Product,
+  signals: LocalTrendSignal[] = localTrendSignals,
+) {
+  return signals
     .map((trend) => ({ trend, score: keywordMatchStrength(product, trend) }))
     .filter((entry) => entry.score > 0)
     .sort((left, right) => {
@@ -196,10 +199,40 @@ export function getMatchingTrendsForProduct(product: Product) {
     .map((entry) => entry.trend);
 }
 
-export function getBestTrendForProduct(product: Product) {
-  return getMatchingTrendsForProduct(product)[0];
+export function getBestTrendForProduct(product: Product, signals?: LocalTrendSignal[]) {
+  return getMatchingTrendsForProduct(product, signals)[0];
 }
 
-export function getTrendScoreForProduct(product: Product) {
-  return getBestTrendForProduct(product)?.growthWeight ?? 0.2;
+export function getTrendScoreForProduct(product: Product, signals?: LocalTrendSignal[]) {
+  // Default to 0.5 (neutral) so unmatched products are not penalised vs. matched ones
+  return getBestTrendForProduct(product, signals)?.growthWeight ?? 0.5;
+}
+
+// Map a free-text search query (e.g. "argentina jersey 2026", "messi jersey bd")
+// to a tracked team. Reuses the SAME hardcoded alias list (`localTrendSignals`)
+// and matching helpers (`normalize` / `includesLoose`) as product↔trend matching,
+// with the same weighting as keywordMatchStrength (team +4, player +3, keyword +2).
+// Returns undefined when the query matches no known team — i.e. a discovery /
+// "stock this next" candidate the UI can flag as an opportunity. No new team list.
+export function matchQueryToTeam(query: string): string | undefined {
+  const q = normalize(query);
+  if (!q) return undefined;
+
+  let best: { team: string; score: number } | undefined;
+  for (const signal of localTrendSignals) {
+    if (!signal.matchedTeam) continue;
+    const team = normalize(signal.matchedTeam);
+    const player = normalize(signal.matchedPlayer);
+    const keyword = normalize(signal.keyword);
+
+    let score = 0;
+    if (team && includesLoose(q, team)) score += 4;
+    if (player && includesLoose(q, player)) score += 3;
+    if (keyword && includesLoose(q, keyword)) score += 2;
+
+    if (score > 0 && (!best || score > best.score)) {
+      best = { team: signal.matchedTeam, score };
+    }
+  }
+  return best?.team;
 }

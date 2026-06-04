@@ -1,15 +1,8 @@
 {
-  "buildCommand": "npm run build",
-  "installCommand": "npm install",
+  "devCommand": "vite --port $PORT --configLoader runner",
+  "buildCommand": "vite build --configLoader runner",
   "outputDirectory": "dist/client",
   "rewrites": [
-    {
-      "source": "/api/(.*)",
-      "destination": "/api/$1"
-    },
-    {
-      "source": "/(.*)",
-      "destination": "/index.html"
-    }
+    { "source": "/((?!api/).*)", "destination": "/index.html" }
   ]
 }

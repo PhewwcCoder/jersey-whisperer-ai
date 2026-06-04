@@ -54,6 +54,11 @@ export interface Variant {
   notes?: string;
 }
 
+export interface CustomerEvent {
+  type: "query" | "confirmed_sale";
+  timestamp: number;
+}
+
 export interface Product {
   id: string;
   product_name: string;
@@ -75,6 +80,7 @@ export interface Product {
   query_count?: number;
   created_at: string;
   variants: Variant[];
+  events?: CustomerEvent[];
 }
 
 export interface FallbackMatch {
