@@ -85,6 +85,28 @@ create table if not exists public.trend_embeddings (
   created_at timestamptz default now()
 );
 
+-- Sports-news demand-signal events (API-Football + google_ai_mode → Gemini parse).
+-- Scored by the DSS news rubric (magnitude base_m x tier weight x decay). `context`
+-- is DISPLAY-ONLY AI demand color and is never read by any scorer.
+create table if not exists public.news_events (
+  id uuid primary key default gen_random_uuid(),
+  type text not null,                 -- transfer | trophy | wc_final | kit_release | retirement | performance
+  player text,
+  team text not null,
+  secondary_team text,
+  event_date timestamptz not null,
+  tier text,                          -- most | mid | low
+  base_m numeric,
+  source text,                        -- api_football | google_ai_mode | demo_seed
+  geo text,
+  context text,                       -- nullable, DISPLAY-ONLY demand color (not scored)
+  created_at timestamptz default now()
+);
+
+-- Idempotent migration for already-created news_events tables: add the nullable,
+-- display-only context column if it isn't present yet.
+alter table public.news_events add column if not exists context text;
+
 create or replace function public.match_product_embeddings(
   query_embedding extensions.vector(384),
   match_threshold float,
@@ -195,3 +217,72 @@ comment on table public.product_embeddings is
   'Hackathon demo policy is intentionally permissive. Production must replace anon RLS with merchant-authenticated policies.';
 comment on table public.trend_embeddings is
   'Hackathon demo policy is intentionally permissive. Production must replace anon RLS with merchant-authenticated policies.';
+
+-- ── news_events: sports events feeding S_news (15% of DSS) ──────────────────
+create table if not exists public.news_events (
+  id            uuid        primary key default gen_random_uuid(),
+  type          text        not null,        -- 'transfer' | 'trophy' | 'wc_final' | 'kit_release' | 'retirement' | 'performance'
+  player        text,                        -- null for team-only events (trophy, kit)
+  team          text        not null,        -- primary team/club/national tagged
+  secondary_team text,                       -- transfer: destination club (team = national, secondary = new club)
+  event_date    timestamptz not null,        -- exact date (API-Football) or first_seen (SerpApi)
+  tier          text        not null,        -- 'most' | 'mid' | 'low'
+  base_m        numeric     not null,        -- rubric value BEFORE tier multiplier
+  source        text        not null,        -- 'api_football' | 'serpapi' | 'demo_seed'
+  geo           text        default 'BD',
+  created_at    timestamptz default now(),
+  unique(type, player, team, event_date)     -- prevents duplicate upserts
+);
+
+create index if not exists news_events_team_idx       on public.news_events(team);
+create index if not exists news_events_event_date_idx on public.news_events(event_date);
+create index if not exists news_events_source_idx     on public.news_events(source);
+
+-- ── jersey_classifications: durable per-day AI verdicts for Box 3 (AI Stock Picks) ──
+-- Replaces the in-memory classify cache so verdicts survive a server restart (the
+-- June-11 seed must still be readable for the June-12 demo). One row per (query, day);
+-- api/classify-jerseys reads today's rows before calling any LLM, and DEMO_MODE serves
+-- the latest day's rows with ZERO outbound LLM/API calls. trend_score is the 20/80
+-- blended market score, stored for ranking. Nothing here is fabricated — every row is
+-- a real OpenRouter/Gemini verdict produced by the seed run.
+create table if not exists public.jersey_classifications (
+  query       text    not null,
+  is_jersey   boolean not null,
+  team        text,
+  kind        text,                         -- 'national' | 'club' | null
+  trend_score numeric,                      -- 20/80 blended score (for ranking)
+  day         date    not null,             -- classification day (per-day cache key)
+  created_at  timestamptz default now(),
+  primary key (query, day)
+);
+
+create index if not exists jersey_classifications_day_idx on public.jersey_classifications(day);
+
+alter table public.jersey_classifications enable row level security;
+
+drop policy if exists "hackathon_jersey_classifications_all" on public.jersey_classifications;
+create policy "hackathon_jersey_classifications_all" on public.jersey_classifications
+  for all to anon using (true) with check (true);
+
+comment on table public.jersey_classifications is
+  'Durable per-day AI jersey verdicts for Box 3. Hackathon policy is permissive — replace with merchant RLS in production.';
+
+alter table public.news_events enable row level security;
+
+drop policy if exists "hackathon_news_events_all" on public.news_events;
+create policy "hackathon_news_events_all" on public.news_events
+  for all to anon using (true) with check (true);
+
+comment on table public.news_events is
+  'Sports events feeding S_news score (15% of DSS). Hackathon policy is permissive — replace with merchant RLS in production.';
+
+-- ── Demo seed rows (non-zero S_news on first load, no API call needed) ───────
+insert into public.news_events (type, player, team, secondary_team, event_date, tier, base_m, source) values
+  ('transfer',    'Kylian Mbappé',      'France',        'Real Madrid',  now() - interval '5 days',  'most', 0.6, 'demo_seed'),
+  ('trophy',       null,                'Real Madrid',    null,           now() - interval '10 days', 'most', 0.7, 'demo_seed'),
+  ('performance', 'Vinicius Junior',    'Real Madrid',    null,           now() - interval '2 days',  'most', 0.4, 'demo_seed'),
+  ('performance', 'Mohamed Salah',      'Liverpool',      null,           now() - interval '3 days',  'most', 0.4, 'demo_seed'),
+  ('wc_final',     null,                'Argentina',      null,           now() - interval '8 days',  'most', 0.5, 'demo_seed'),
+  ('retirement',  'Luka Modric',        'Real Madrid',    null,           now() - interval '14 days', 'mid',  0.3, 'demo_seed'),
+  ('kit_release',  null,                'Barcelona',      null,           now() - interval '6 days',  'most', 0.4, 'demo_seed')
+on conflict (type, player, team, event_date) do nothing;

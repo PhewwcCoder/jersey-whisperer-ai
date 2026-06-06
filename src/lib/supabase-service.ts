@@ -278,6 +278,45 @@ function detectLanguage(text: string) {
   return "en";
 }
 
+// Stable logical identity for a product (independent of its DB id). Seed products
+// are assigned a fresh crypto.randomUUID() on every boot, so re-seeding / resetDemo
+// upserts (onConflict: "id") never collide with prior rows and the products table
+// accumulates multiple rows for the same kit. Those duplicates have different ids
+// but identical attributes → identical DSS → the same card repeats in the Top 10.
+// We collapse them here on READ (keeping the first = newest, since the query is
+// ordered created_at desc). DB rows are left untouched — no user data is deleted.
+function productIdentitySignature(product: Product): string {
+  const sizes = safeVariants(product)
+    .map((variant) => variant.size)
+    .filter(Boolean)
+    .sort()
+    .join(",");
+  return [
+    product.team_country_club,
+    product.product_name,
+    product.kit_type,
+    product.edition_type,
+    product.season_year,
+    product.player_name ?? "",
+    product.font_name ?? "",
+    sizes,
+  ]
+    .map((part) => String(part).trim().toLowerCase())
+    .join("|");
+}
+
+function dedupeProductsByIdentity(products: Product[]): Product[] {
+  const seen = new Set<string>();
+  const unique: Product[] = [];
+  for (const product of products) {
+    const signature = productIdentitySignature(product);
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    unique.push(product);
+  }
+  return unique;
+}
+
 export async function fetchProductsFromSupabase() {
   return withSupabaseTimeout("fetch products", async () => {
     const supabase = await getSupabaseClient();
@@ -289,7 +328,9 @@ export async function fetchProductsFromSupabase() {
 
     if (error) throw error;
     if (!data) return [];
-    return (data as ProductRow[]).map((row) => parseProductRow(row));
+    // Dedupe logical duplicates (same kit re-seeded under new ids) so each unique
+    // product appears once. Keeps the first occurrence (newest by created_at).
+    return dedupeProductsByIdentity((data as ProductRow[]).map((row) => parseProductRow(row)));
   }, []);
 }
 
@@ -367,7 +408,6 @@ export async function fetchMarketDiscoveryFromSupabase(geo = "BD"): Promise<Mark
       if (error) throw error;
       if (!data || !data.length) return emptyMarketDiscovery;
 
-      const geoSignals: MarketDiscovery["geo"] = [];
       const related: MarketDiscovery["related"] = [];
       let fetchedAt: string | undefined;
 
@@ -377,14 +417,7 @@ export async function fetchMarketDiscoveryFromSupabase(geo = "BD"): Promise<Mark
         const rowFetchedAt = (row.fetched_at as string) || undefined;
         if (rowFetchedAt && (!fetchedAt || rowFetchedAt > fetchedAt)) fetchedAt = rowFetchedAt;
 
-        if (kind === "geo_map") {
-          geoSignals.push({
-            team: (row.team as string) || "",
-            location: (row.label as string) || "",
-            value: rawValue,
-            score: safeNumber(row.score, rawValue / 100),
-          });
-        } else if (kind === "related_top" || kind === "related_rising") {
+        if (kind === "related_top" || kind === "related_rising") {
           const bucket = kind === "related_rising" ? "rising" : "top";
           related.push({
             query: (row.label as string) || "",
@@ -398,9 +431,7 @@ export async function fetchMarketDiscoveryFromSupabase(geo = "BD"): Promise<Mark
         }
       }
 
-      // Per-geo, live: return exactly what this geo has cached (no cross-geo backfill — an
-      // empty feature renders its own empty-state, not another market's demo data).
-      return { live: true, fetchedAt, geo: geoSignals, related };
+      return { live: true, fetchedAt, related };
     },
     emptyMarketDiscovery,
   );

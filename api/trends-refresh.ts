@@ -2,22 +2,21 @@
 // Safe to call with no SERPAPI_KEY: returns ok:false so the UI stays on cached snapshots.
 // TODO: wire a Vercel Cron or Supabase pg_cron for scheduled refresh (twice-weekly on free tier).
 
+// node-fetch shadows the global fetch to avoid the Windows libuv assertion crash
+// (Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c line 76)
+// that Node.js native fetch (undici) triggers during serverless function teardown on Windows.
+import nodeFetch from "node-fetch";
+const fetch = nodeFetch as unknown as typeof globalThis.fetch;
+
 // Reuse the shared alias matcher (hardcoded team/alias list) for query→team dedup.
 import { matchQueryToTeam } from "../src/lib/trend-signals";
+// Football-relevance filter for the related-queries DISPLAY boxes (drops cricket/
+// other-sport/noise queries). DISPLAY-DATA ONLY — never touches DSS/trend_signals.
+import { isFootballRelevant } from "../src/lib/football-filter";
 
 const SERPAPI_BASE = "https://serpapi.com/search.json";
 
-const DEFAULT_TEAMS = [
-  "Argentina",
-  "Brazil",
-  "Portugal",
-  "Real Madrid",
-  "Barcelona",
-  "Bangladesh",
-];
-
-// Teams we build a worldwide "Interest By Region" map for (market discovery — Feature 1).
-const GEO_MAP_TEAMS = ["Argentina", "Brazil", "Portugal", "Real Madrid", "Barcelona"];
+const DEFAULT_TEAMS = ["Argentina", "Brazil", "Portugal", "Real Madrid", "Barcelona", "Bangladesh"];
 
 // geo-agnostic: change geo to serve any market — scalability by design.
 // Default geo when the request body omits one. "" would mean worldwide.
@@ -136,101 +135,6 @@ async function fetchScoreForKeyword(
 }
 
 // ---------------------------------------------------------------------------
-// Feature 1: Interest By Region (GEO_MAP) — which countries search "<team> jersey"
-// ---------------------------------------------------------------------------
-interface RegionEntry {
-  location: string;
-  value: number;
-}
-
-interface GeoRegionRow {
-  location?: string;
-  geo?: string;
-  value?: number | string;
-  extracted_value?: number;
-}
-
-interface GeoMapShape {
-  interest_by_region?: GeoRegionRow[] | Record<string, GeoRegionRow[]>;
-  compared_breakdown_by_region?: GeoRegionRow[];
-  error?: string;
-}
-
-// Coerce SerpApi's region value to a 0..100 number. extracted_value is the clean field,
-// but some responses only carry `value` (sometimes a "53" string), so accept both.
-function regionValue(row: GeoRegionRow): number {
-  if (typeof row.extracted_value === "number") return row.extracted_value;
-  const raw = typeof row.value === "string" ? parseInt(row.value, 10) : row.value;
-  return typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
-}
-
-async function fetchGeoMap(
-  team: string,
-  apiKey: string,
-  geo: string,
-): Promise<RegionEntry[]> {
-  // data_type=GEO_MAP_0 → "Interest By Region" for a SINGLE query (what we want).
-  // GEO_MAP (no suffix) is "Compared Breakdown By Region" and requires MULTIPLE
-  // comma-separated queries — a single query 400s with
-  // "Please change the `data_type` to one that supports a single query."
-  // Omit `region` so SerpApi applies its default granularity: COUNTRY worldwide
-  // when no geo is sent, sub-regions when a geo is given. Omit geo entirely for
-  // worldwide. geo-agnostic: change geo to serve any market — scalability by design.
-  const params = new URLSearchParams({
-    engine: "google_trends",
-    q: `${team} jersey`,
-    data_type: "GEO_MAP_0",
-    hl: "en",
-    api_key: apiKey,
-  });
-  if (geo) params.set("geo", geo); // omitted entirely → worldwide country breakdown
-
-  const url = `${SERPAPI_BASE}?${params.toString()}`;
-  // Redacted request URL (never log the api_key) — for diagnosing 400s.
-  console.log(`[trends-refresh] GEO_MAP_0 request: ${url.replace(apiKey, "REDACTED")}`);
-
-  const response = await fetch(url);
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    console.warn(
-      `[trends-refresh] GEO_MAP_0 HTTP ${response.status} for "${team}" geo="${geo}": ` +
-        body.slice(0, 300),
-    );
-    return [];
-  }
-
-  const data = (await response.json()) as GeoMapShape;
-  if (data.error) {
-    console.warn(`[trends-refresh] GEO_MAP_0 error for "${team}" geo="${geo}": ${data.error}`);
-    return [];
-  }
-
-  // interest_by_region can be an array OR an object keyed by single-query name; also fall
-  // back to compared_breakdown_by_region. Normalize to a flat array.
-  const byRegion = data.interest_by_region;
-  let rows: GeoRegionRow[] = [];
-  if (Array.isArray(byRegion)) {
-    rows = byRegion;
-  } else if (byRegion && typeof byRegion === "object") {
-    rows = Object.values(byRegion).flat();
-  } else if (Array.isArray(data.compared_breakdown_by_region)) {
-    rows = data.compared_breakdown_by_region;
-  }
-
-  // One-shot raw-shape log to confirm the live response structure (debugging geoMarkets:[]).
-  console.log(
-    `[trends-refresh] GEO_MAP "${team}" geo="${geo}": top-keys=${Object.keys(data).join(",")} ` +
-      `rows=${rows.length} sample=${JSON.stringify(rows[0] ?? null)}`,
-  );
-
-  return rows
-    .map((r) => ({ location: r.location ?? "", value: regionValue(r) }))
-    .filter((r) => r.location && r.value > 0)
-    .sort((a, b) => b.value - a.value)
-    .slice(0, 8);
-}
-
-// ---------------------------------------------------------------------------
 // Feature 2: Related Queries — top + rising jersey searches in a market
 // ---------------------------------------------------------------------------
 interface RelatedEntry {
@@ -290,13 +194,13 @@ async function fetchRelatedQueries(
 }
 
 // Weighted recency blend for ONE bucket (top OR rising), merged per query:
-//   blended = 0.60 * score_24h + 0.40 * score_7d   (score = extracted_value;
+//   blended = 0.20 * score_24h + 0.80 * score_7d   (score = extracted_value;
 //   a query absent from a window counts as 0 there).
 // FALLBACK (low-traffic hours, e.g. early morning): if the 24h window is
 // empty/all-zero, use 100% of the 7-day data so the card is NEVER blank.
 // Returns usedFallback so the caller can log when the fallback fires.
-const WEIGHT_24H = 0.6;
-const WEIGHT_7D = 0.4;
+const WEIGHT_24H = 0.2;
+const WEIGHT_7D = 0.8;
 
 function blendByQuery(
   win24: RelatedEntry[],
@@ -348,7 +252,12 @@ function dedupeByTeam(list: RelatedEntry[]): DedupedQuery[] {
     const team = matchQueryToTeam(entry.query);
     if (!team) {
       // No known team → keep as-is; discovery / "stock this next" candidate.
-      opportunities.push({ query: entry.query, value: entry.value, team: null, status: "opportunity" });
+      opportunities.push({
+        query: entry.query,
+        value: entry.value,
+        team: null,
+        status: "opportunity",
+      });
       continue;
     }
     const existing = bestByTeam.get(team);
@@ -361,11 +270,7 @@ function dedupeByTeam(list: RelatedEntry[]): DedupedQuery[] {
   return [...bestByTeam.values(), ...opportunities].sort((a, b) => b.value - a.value);
 }
 
-async function deleteMarketRows(
-  supabaseUrl: string,
-  apiKey: string,
-  query: string,
-): Promise<void> {
+async function deleteMarketRows(supabaseUrl: string, apiKey: string, query: string): Promise<void> {
   const response = await fetch(`${supabaseUrl}/rest/v1/market_discovery?${query}`, {
     method: "DELETE",
     headers: {
@@ -465,10 +370,230 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+export type RefreshEntry = {
+  team: string;
+  keyword: string;
+  trendScore: number;
+  momentumLabel: string;
+  explanation: string;
+  ok: boolean;
+  error?: string;
+};
+
+export type RelatedQueriesResult = {
+  top: RelatedEntry[];
+  rising: RelatedEntry[];
+  topByTeam: DedupedQuery[];
+  risingByTeam: DedupedQuery[];
+  window: string;
+  fallback: { top: boolean; rising: boolean };
+};
+
+// Core trends refresh — callable directly from the seed script without an HTTP server.
+export async function runTrendsRefresh(params: {
+  serpApiKey: string;
+  supabaseUrl: string;
+  supabaseKey: string;
+  geo: string;
+  teams: string[];
+}): Promise<{ refreshed: RefreshEntry[]; relatedQueries: RelatedQueriesResult }> {
+  const { serpApiKey, supabaseUrl, supabaseKey, geo: selectedGeo, teams } = params;
+
+  const refreshed: RefreshEntry[] = [];
+
+  for (const team of teams) {
+    try {
+      const primaryKeyword = `${team.toLowerCase()} jersey`;
+      const extraKeyword = TEAM_EXTRA_KEYWORDS[team];
+
+      const scorePromises: Promise<ScoreResult | null>[] = [
+        fetchScoreForKeyword(primaryKeyword, serpApiKey, selectedGeo),
+      ];
+      if (extraKeyword) {
+        scorePromises.push(fetchScoreForKeyword(extraKeyword, serpApiKey, selectedGeo));
+      }
+
+      const settled = await Promise.allSettled(scorePromises);
+      const scores = settled
+        .filter((r): r is PromiseFulfilledResult<ScoreResult | null> => r.status === "fulfilled")
+        .map((r) => r.value)
+        .filter((s): s is ScoreResult => s !== null);
+
+      if (!scores.length) {
+        refreshed.push({
+          team,
+          keyword: primaryKeyword,
+          trendScore: 0,
+          momentumLabel: "stable",
+          explanation: "No usable data returned by SerpApi.",
+          ok: false,
+          error: "No usable timeline data",
+        });
+        continue;
+      }
+
+      const best = scores.reduce((a, b) => (b.trendScore01 > a.trendScore01 ? b : a));
+      const label = momentumLabel(best.trendScore01);
+      const pct = Math.round(best.momentum * 100);
+      const sign = pct >= 0 ? "+" : "";
+      const geoLabel = selectedGeo || "worldwide";
+      const lowBaseline = best.baselineMean < 1 || Math.abs(pct) > 1000;
+      const explanation = lowBaseline
+        ? `Breakout (low baseline) · recent avg ${Math.round(best.recentMean)}/100 ` +
+          `(SerpApi TIMESERIES geo=${geoLabel})`
+        : `Interest ${sign}${pct}% vs 8-wk baseline · ` +
+          `recent avg ${Math.round(best.recentMean)}/100 (SerpApi TIMESERIES geo=${geoLabel})`;
+
+      await deleteSupabaseRows(supabaseUrl, supabaseKey, team, selectedGeo);
+      await insertSupabaseRow(supabaseUrl, supabaseKey, {
+        keyword: best.keyword,
+        geo: selectedGeo,
+        channel: "web",
+        language: best.language,
+        momentum: label,
+        growth_weight: best.trendScore01,
+        matched_team: team,
+        matched_player: null,
+        explanation,
+        source: "serpapi_google_trends",
+        fetched_at: new Date().toISOString(),
+      });
+
+      refreshed.push({
+        team,
+        keyword: best.keyword,
+        trendScore: best.trendScore01,
+        momentumLabel: label,
+        explanation,
+        ok: true,
+      });
+      console.log(
+        `[trends-refresh] ${team}: score=${best.trendScore01.toFixed(3)} (${label}) — "${best.keyword}"`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      console.error(`[trends-refresh] Failed for "${team}":`, message);
+      refreshed.push({
+        team,
+        keyword: `${team.toLowerCase()} jersey`,
+        trendScore: 0,
+        momentumLabel: "stable",
+        explanation: "",
+        ok: false,
+        error: message,
+      });
+    }
+  }
+
+  const relatedQueries: RelatedQueriesResult = {
+    top: [],
+    rising: [],
+    topByTeam: [],
+    risingByTeam: [],
+    window: "20% last 24h + 80% last 7 days",
+    fallback: { top: false, rising: false },
+  };
+  try {
+    const fetchedAt = new Date().toISOString();
+    let win24: { top: RelatedEntry[]; rising: RelatedEntry[] } = { top: [], rising: [] };
+    try {
+      win24 = await fetchRelatedQueries(serpApiKey, selectedGeo, "now 1-d");
+    } catch (error) {
+      console.error("[trends-refresh] RELATED_QUERIES 24h call failed:", error);
+    }
+    let win7: { top: RelatedEntry[]; rising: RelatedEntry[] } = { top: [], rising: [] };
+    try {
+      win7 = await fetchRelatedQueries(serpApiKey, selectedGeo, "now 7-d");
+    } catch (error) {
+      console.error("[trends-refresh] RELATED_QUERIES 7d call failed:", error);
+    }
+
+    const topBlend = blendByQuery(win24.top, win7.top);
+    const risingBlend = blendByQuery(win24.rising, win7.rising);
+    relatedQueries.fallback = { top: topBlend.usedFallback, rising: risingBlend.usedFallback };
+
+    let aiCalls = 0;
+    const filterFootball = async (entries: RelatedEntry[]): Promise<RelatedEntry[]> => {
+      const kept: RelatedEntry[] = [];
+      for (const entry of entries) {
+        try {
+          const verdict = await isFootballRelevant(entry.query);
+          if (verdict.usedAI) aiCalls += 1;
+          if (verdict.relevant) kept.push(entry);
+        } catch (error) {
+          console.error(`[football-filter] classify failed for "${entry.query}":`, error);
+          kept.push(entry);
+        }
+      }
+      return kept;
+    };
+
+    const totalToClassify = topBlend.entries.length + risingBlend.entries.length;
+    const top = await filterFootball(topBlend.entries);
+    const rising = await filterFootball(risingBlend.entries);
+    console.log(
+      `[football-filter] AI classified ${aiCalls} of ${totalToClassify} queries ` +
+        `(kept top ${top.length}/${topBlend.entries.length}, rising ${rising.length}/${risingBlend.entries.length})`,
+    );
+
+    if (top.length || rising.length) {
+      const topByTeam = dedupeByTeam(top);
+      const risingByTeam = dedupeByTeam(rising);
+      await deleteMarketRows(
+        supabaseUrl,
+        supabaseKey,
+        `kind=in.(related_top,related_rising)&geo=eq.${encodeURIComponent(selectedGeo)}`,
+      );
+      const rows: Record<string, unknown>[] = [
+        ...top.map((e) => ({
+          kind: "related_top",
+          team: matchQueryToTeam(e.query) ?? null,
+          label: e.query,
+          score: clamp01(e.value / 100),
+          raw_value: e.value,
+          geo: selectedGeo,
+          source: "serpapi_google_trends",
+          fetched_at: fetchedAt,
+        })),
+        ...rising.map((e) => ({
+          kind: "related_rising",
+          team: matchQueryToTeam(e.query) ?? null,
+          label: e.query,
+          score: scoreRising(e.value),
+          raw_value: e.value,
+          geo: selectedGeo,
+          source: "serpapi_google_trends",
+          fetched_at: fetchedAt,
+        })),
+      ];
+      await insertMarketRows(supabaseUrl, supabaseKey, rows);
+      relatedQueries.top = top;
+      relatedQueries.rising = rising;
+      relatedQueries.topByTeam = topByTeam;
+      relatedQueries.risingByTeam = risingByTeam;
+      console.log(
+        `[trends-refresh] RELATED_QUERIES geo=${selectedGeo} (blended 20/80): ` +
+          `top ${top.length}→${topByTeam.length}, rising ${rising.length}→${risingByTeam.length}`,
+      );
+    }
+  } catch (error) {
+    console.error("[trends-refresh] RELATED_QUERIES stage failed:", error);
+  }
+
+  return { refreshed, relatedQueries };
+}
+
 export default {
   async fetch(request: Request): Promise<Response> {
     if (request.method !== "POST") {
       return jsonResponse({ error: "Method not allowed. Use POST." }, 405);
+    }
+
+    // DEMO_MODE: skip all SerpApi and news calls; return immediately so the client
+    // keeps rendering the cached Supabase data that was seeded before the demo.
+    if (process.env.DEMO_MODE === "true") {
+      console.log("[trends-refresh] DEMO_MODE — skipping live API calls");
+      return jsonResponse({ ok: true, demo: true });
     }
 
     const serpApiKey = process.env.SERPAPI_KEY;
@@ -491,280 +616,25 @@ export default {
     }
 
     let teams: string[] = DEFAULT_TEAMS;
-    // geo-agnostic: one selected geo drives every SerpApi call this refresh (TIMESERIES,
-    // GEO_MAP, RELATED_QUERIES) and tags every cached row — scalability by design.
     let selectedGeo = DEFAULT_GEO;
     try {
       const body = (await request.json()) as { teams?: string[]; geo?: string };
-      if (Array.isArray(body.teams) && body.teams.length) {
-        teams = body.teams;
-      }
-      // Accept "" explicitly (= Worldwide); only undefined keeps the default.
-      if (typeof body.geo === "string") {
-        selectedGeo = body.geo.trim();
-      }
+      if (Array.isArray(body.teams) && body.teams.length) teams = body.teams;
+      if (typeof body.geo === "string") selectedGeo = body.geo.trim();
     } catch {
       // No body or invalid JSON — use defaults
     }
 
-    type RefreshEntry = {
-      team: string;
-      keyword: string;
-      trendScore: number;
-      momentumLabel: string;
-      explanation: string;
-      ok: boolean;
-      error?: string;
-    };
-
-    const refreshed: RefreshEntry[] = [];
-
-    for (const team of teams) {
-      // Per-team try/catch — one failure must not abort the rest (quota safety)
-      try {
-        const primaryKeyword = `${team.toLowerCase()} jersey`;
-        const extraKeyword = TEAM_EXTRA_KEYWORDS[team];
-
-        const scorePromises: Promise<ScoreResult | null>[] = [
-          fetchScoreForKeyword(primaryKeyword, serpApiKey, selectedGeo),
-        ];
-        if (extraKeyword) {
-          scorePromises.push(fetchScoreForKeyword(extraKeyword, serpApiKey, selectedGeo));
-        }
-
-        const settled = await Promise.allSettled(scorePromises);
-        const scores = settled
-          .filter(
-            (r): r is PromiseFulfilledResult<ScoreResult | null> => r.status === "fulfilled",
-          )
-          .map((r) => r.value)
-          .filter((s): s is ScoreResult => s !== null);
-
-        if (!scores.length) {
-          refreshed.push({
-            team,
-            keyword: primaryKeyword,
-            trendScore: 0,
-            momentumLabel: "stable",
-            explanation: "No usable data returned by SerpApi.",
-            ok: false,
-            error: "No usable timeline data",
-          });
-          continue;
-        }
-
-        // Pick the keyword variant with the strongest momentum signal
-        const best = scores.reduce((a, b) => (b.trendScore01 > a.trendScore01 ? b : a));
-        const label = momentumLabel(best.trendScore01);
-        const pct = Math.round(best.momentum * 100);
-        const sign = pct >= 0 ? "+" : "";
-        const geoLabel = selectedGeo || "worldwide";
-        // Cap the displayed % when the baseline is ~0 (e.g. Brazil "+4625000000%"): a tiny
-        // baseline makes the ratio explode. trendScore math is unchanged (tanh-bounded) —
-        // this only fixes the human-readable string.
-        const lowBaseline = best.baselineMean < 1 || Math.abs(pct) > 1000;
-        const explanation = lowBaseline
-          ? `Breakout (low baseline) · recent avg ${Math.round(best.recentMean)}/100 ` +
-            `(SerpApi TIMESERIES geo=${geoLabel})`
-          : `Interest ${sign}${pct}% vs 8-wk baseline · ` +
-            `recent avg ${Math.round(best.recentMean)}/100 (SerpApi TIMESERIES geo=${geoLabel})`;
-
-        await deleteSupabaseRows(supabaseUrl, supabaseKey, team, selectedGeo);
-        await insertSupabaseRow(supabaseUrl, supabaseKey, {
-          keyword: best.keyword,
-          geo: selectedGeo,
-          channel: "web",
-          language: best.language,
-          momentum: label,
-          growth_weight: best.trendScore01,
-          matched_team: team,
-          matched_player: null,
-          explanation,
-          source: "serpapi_google_trends",
-          fetched_at: new Date().toISOString(),
-        });
-
-        refreshed.push({
-          team,
-          keyword: best.keyword,
-          trendScore: best.trendScore01,
-          momentumLabel: label,
-          explanation,
-          ok: true,
-        });
-
-        console.log(
-          `[trends-refresh] ${team}: score=${best.trendScore01.toFixed(3)} (${label}) — "${best.keyword}"`,
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown error";
-        console.error(`[trends-refresh] Failed for "${team}":`, message);
-        refreshed.push({
-          team,
-          keyword: `${team.toLowerCase()} jersey`,
-          trendScore: 0,
-          momentumLabel: "stable",
-          explanation: "",
-          ok: false,
-          error: message,
-        });
-      }
-    }
-
-    // -----------------------------------------------------------------------
-    // Feature 1: Interest By Region (GEO_MAP), scoped to the selected geo.
-    // geo="" → worldwide countries (expansion story); a country code → its sub-regions.
-    // Stored in market_discovery (kind='geo_map'), SEPARATE from per-product DSS,
-    // tagged with the selected geo so the cache is per-market.
-    // -----------------------------------------------------------------------
-    const geoMarkets: Array<{ team: string; location: string; value: number }> = [];
-    try {
-      const fetchedAt = new Date().toISOString();
-      for (const team of GEO_MAP_TEAMS) {
-        // Per-team try/catch — one quota failure must not abort the rest.
-        try {
-          const regions = await fetchGeoMap(team, serpApiKey, selectedGeo);
-          if (!regions.length) continue;
-
-          await deleteMarketRows(
-            supabaseUrl,
-            supabaseKey,
-            `kind=eq.geo_map&team=eq.${encodeURIComponent(team)}&geo=eq.${encodeURIComponent(selectedGeo)}`,
-          );
-          await insertMarketRows(
-            supabaseUrl,
-            supabaseKey,
-            regions.map((r) => ({
-              kind: "geo_map",
-              team,
-              label: r.location,
-              score: clamp01(r.value / 100),
-              raw_value: r.value,
-              geo: selectedGeo,
-              source: "serpapi_google_trends",
-              fetched_at: fetchedAt,
-            })),
-          );
-          regions.forEach((r) => geoMarkets.push({ team, location: r.location, value: r.value }));
-          console.log(`[trends-refresh] GEO_MAP ${team}: ${regions.length} markets`);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "Unknown error";
-          console.error(`[trends-refresh] GEO_MAP failed for "${team}":`, message);
-        }
-      }
-    } catch (error) {
-      console.error("[trends-refresh] GEO_MAP stage failed:", error);
-    }
-
-    // -----------------------------------------------------------------------
-    // Feature 2: Related Queries — WEIGHTED RECENCY BLEND.
-    // TWO RELATED_QUERIES calls per refresh (2/refresh, well under the 100/mo cap):
-    //   call A date="now 1-d" (past 24h), call B date="now 7-d" (past 7 days).
-    // blended = 0.60*score_24h + 0.40*score_7d per query; 24h empty → 100% 7-day.
-    // -----------------------------------------------------------------------
-    const relatedQueries: {
-      top: RelatedEntry[];
-      rising: RelatedEntry[];
-      topByTeam: DedupedQuery[];
-      risingByTeam: DedupedQuery[];
-      window: string;
-      fallback: { top: boolean; rising: boolean };
-    } = {
-      top: [],
-      rising: [],
-      topByTeam: [],
-      risingByTeam: [],
-      window: "60% last 24h + 40% last 7 days",
-      fallback: { top: false, rising: false },
-    };
-    try {
-      const fetchedAt = new Date().toISOString();
-
-      // Each window call in its own try/catch — one quota failure must not abort the other.
-      let win24: { top: RelatedEntry[]; rising: RelatedEntry[] } = { top: [], rising: [] };
-      try {
-        win24 = await fetchRelatedQueries(serpApiKey, selectedGeo, "now 1-d");
-      } catch (error) {
-        console.error("[trends-refresh] RELATED_QUERIES 24h call failed:", error);
-      }
-      let win7: { top: RelatedEntry[]; rising: RelatedEntry[] } = { top: [], rising: [] };
-      try {
-        win7 = await fetchRelatedQueries(serpApiKey, selectedGeo, "now 7-d");
-      } catch (error) {
-        console.error("[trends-refresh] RELATED_QUERIES 7d call failed:", error);
-      }
-
-      // Blend each bucket; fall back to 100% 7-day when the 24h window is empty.
-      const topBlend = blendByQuery(win24.top, win7.top);
-      const risingBlend = blendByQuery(win24.rising, win7.rising);
-      relatedQueries.fallback = { top: topBlend.usedFallback, rising: risingBlend.usedFallback };
-      if (topBlend.usedFallback) {
-        console.log(
-          `[trends-refresh] RELATED_QUERIES top: 24h empty → FALLBACK to 100% 7-day ` +
-            `(${win7.top.length} queries) so the card is never blank`,
-        );
-      }
-      if (risingBlend.usedFallback) {
-        console.log(
-          `[trends-refresh] RELATED_QUERIES rising: 24h empty → FALLBACK to 100% 7-day ` +
-            `(${win7.rising.length} queries) so the card is never blank`,
-        );
-      }
-
-      const top = topBlend.entries;
-      const rising = risingBlend.entries;
-
-      if (top.length || rising.length) {
-        // Team-level dedup of the BLENDED lists (keep highest blended per team);
-        // unmatched queries stay as "opportunity". Raw blended lists kept intact.
-        const topByTeam = dedupeByTeam(top);
-        const risingByTeam = dedupeByTeam(rising);
-
-        await deleteMarketRows(
-          supabaseUrl,
-          supabaseKey,
-          `kind=in.(related_top,related_rising)&geo=eq.${encodeURIComponent(selectedGeo)}`,
-        );
-        // Store EVERY blended query (no data loss) tagged with its matched team
-        // (or null) so the cache carries the mapping for dedup on read.
-        const rows: Record<string, unknown>[] = [
-          ...top.map((e) => ({
-            kind: "related_top",
-            team: matchQueryToTeam(e.query) ?? null,
-            label: e.query,
-            score: clamp01(e.value / 100), // S_top = blended / 100
-            raw_value: e.value,
-            geo: selectedGeo,
-            source: "serpapi_google_trends",
-            fetched_at: fetchedAt,
-          })),
-          ...rising.map((e) => ({
-            kind: "related_rising",
-            team: matchQueryToTeam(e.query) ?? null,
-            label: e.query,
-            score: scoreRising(e.value), // saturating, on the blended value
-            raw_value: e.value,
-            geo: selectedGeo,
-            source: "serpapi_google_trends",
-            fetched_at: fetchedAt,
-          })),
-        ];
-        await insertMarketRows(supabaseUrl, supabaseKey, rows);
-        relatedQueries.top = top;
-        relatedQueries.rising = rising;
-        relatedQueries.topByTeam = topByTeam;
-        relatedQueries.risingByTeam = risingByTeam;
-        console.log(
-          `[trends-refresh] RELATED_QUERIES geo=${selectedGeo} (blended 60/40): ` +
-            `top ${top.length}→${topByTeam.length}, rising ${rising.length}→${risingByTeam.length} ` +
-            `(team-deduped; fallback top=${topBlend.usedFallback} rising=${risingBlend.usedFallback})`,
-        );
-      }
-    } catch (error) {
-      console.error("[trends-refresh] RELATED_QUERIES stage failed:", error);
-    }
+    const { refreshed, relatedQueries } = await runTrendsRefresh({
+      serpApiKey,
+      supabaseUrl,
+      supabaseKey,
+      geo: selectedGeo,
+      teams,
+    });
 
     // ── news refresh (non-blocking) ──────────────────────────────────────────
+    // API-Football transfers/fixtures. Separate try/catch so it can't block others.
     try {
       const { refreshNewsEvents } = await import("./news-refresh");
       await refreshNewsEvents();
@@ -772,10 +642,19 @@ export default {
       console.error("news-refresh failed (non-blocking):", e);
     }
 
+    // ── Google AI Mode football news → Gemini parse (non-blocking, own guard) ──
+    // Own try/catch + internal 20h cache so one "Refresh trends" click updates
+    // trends + transfers + news, and any one failing never blocks the others.
+    try {
+      const { refreshFootballNews } = await import("./football-news-refresh");
+      await refreshFootballNews();
+    } catch (e) {
+      console.error("football-news-refresh failed (non-blocking):", e);
+    }
+
     return jsonResponse({
       ok: true,
       refreshed,
-      geoMarkets,
       relatedQueries,
     });
   },

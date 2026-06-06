@@ -3,12 +3,7 @@
 // data is live (Supabase `market_discovery` table) or this demo fallback. Never removed — they are
 // the graceful fallback when SERPAPI_KEY is unset, a call fails, or the DB has no rows.
 
-export interface GeoMarketSignal {
-  team: string;
-  location: string;
-  value: number; // SerpApi extracted_value (0..100)
-  score: number; // S_geo = value / 100
-}
+import { TIER_LISTS } from "./news-score";
 
 export interface RelatedQuerySignal {
   query: string;
@@ -18,75 +13,30 @@ export interface RelatedQuerySignal {
 }
 
 export interface MarketDiscovery {
-  geo: GeoMarketSignal[];
   related: RelatedQuerySignal[];
   fetchedAt?: string; // ISO timestamp when the data is live; undefined for fallback
   live: boolean;
 }
-
-export const GEO_MAP_TEAMS = ["Argentina", "Brazil", "Portugal", "Real Madrid", "Barcelona"];
 
 // The market the hardcoded snapshots represent. Cache misses for THIS geo fall back to the
 // demo snapshot (so the showcase market is never blank); misses for other geos show an
 // explicit "no data yet" empty-state instead.
 export const DEMO_GEO = "BD";
 
-// Google Trends geo codes offered in the location selector. "" = Worldwide.
-// geo-agnostic: add a row here to serve any new market — scalability by design.
 export const GEO_OPTIONS: Array<{ code: string; name: string }> = [
   { code: "BD", name: "Bangladesh" },
-  { code: "GB", name: "United Kingdom" },
-  { code: "US", name: "United States" },
-  { code: "MY", name: "Malaysia" },
   { code: "IN", name: "India" },
-  { code: "", name: "Worldwide" },
+  { code: "TH", name: "Thailand" },
+  { code: "TR", name: "Turkey" },
+  { code: "US", name: "United States" },
 ];
 
 export function geoName(code: string): string {
-  return GEO_OPTIONS.find((option) => option.code === code)?.name ?? (code || "Worldwide");
+  return GEO_OPTIONS.find((option) => option.code === code)?.name ?? code;
 }
 
 // Empty (non-demo) market discovery — used when a non-demo geo has no cached rows yet.
-export const emptyMarketDiscovery: MarketDiscovery = { live: false, geo: [], related: [] };
-
-// Worldwide top markets searching "<team> jersey" (extracted_value 0..100).
-const FALLBACK_GEO_RAW: Record<string, Array<{ location: string; value: number }>> = {
-  Argentina: [
-    { location: "Argentina", value: 100 },
-    { location: "Bangladesh", value: 71 },
-    { location: "India", value: 39 },
-    { location: "Indonesia", value: 28 },
-    { location: "Uruguay", value: 22 },
-  ],
-  Brazil: [
-    { location: "Brazil", value: 100 },
-    { location: "Bangladesh", value: 55 },
-    { location: "India", value: 41 },
-    { location: "Nigeria", value: 30 },
-    { location: "Indonesia", value: 26 },
-  ],
-  Portugal: [
-    { location: "Portugal", value: 100 },
-    { location: "India", value: 34 },
-    { location: "Bangladesh", value: 33 },
-    { location: "Indonesia", value: 25 },
-    { location: "Brazil", value: 19 },
-  ],
-  "Real Madrid": [
-    { location: "Indonesia", value: 100 },
-    { location: "India", value: 62 },
-    { location: "Spain", value: 47 },
-    { location: "Bangladesh", value: 35 },
-    { location: "Mexico", value: 31 },
-  ],
-  Barcelona: [
-    { location: "Indonesia", value: 100 },
-    { location: "India", value: 58 },
-    { location: "Egypt", value: 44 },
-    { location: "Spain", value: 40 },
-    { location: "Bangladesh", value: 33 },
-  ],
-};
+export const emptyMarketDiscovery: MarketDiscovery = { live: false, related: [] };
 
 // Related queries for q="jersey", geo=BD.
 const FALLBACK_RELATED_TOP: Array<{ query: string; value: number }> = [
@@ -105,10 +55,6 @@ const FALLBACK_RELATED_RISING: Array<{ query: string; value: number }> = [
   { query: "portugal jersey 2026", value: 90 },
 ];
 
-export function scoreGeo(value: number): number {
-  return Math.max(0, Math.min(1, value / 100));
-}
-
 // Saturating score so breakout values don't dominate linearly.
 export function scoreRising(value: number): number {
   return value / (value + 200);
@@ -120,14 +66,6 @@ export function scoreTop(value: number): number {
 
 export const fallbackMarketDiscovery: MarketDiscovery = {
   live: false,
-  geo: GEO_MAP_TEAMS.flatMap((team) =>
-    (FALLBACK_GEO_RAW[team] ?? []).map((entry) => ({
-      team,
-      location: entry.location,
-      value: entry.value,
-      score: scoreGeo(entry.value),
-    })),
-  ),
   related: [
     ...FALLBACK_RELATED_TOP.map((entry) => ({
       query: entry.query,
@@ -162,6 +100,84 @@ export function isFresh(iso: string | undefined, withinMs = 60 * 60 * 1000): boo
   if (!iso) return false;
   const then = new Date(iso).getTime();
   return Number.isFinite(then) && Date.now() - then < withinMs;
+}
+
+// ── Jersey-relevance filter for the Top/Rising related-query panel ─────────────
+// Deterministic + synchronous (NEVER calls AI) so it can't misfire live on stage.
+// DISPLAY-ONLY — it filters what the "Top Searches / Rising / What to Stock Next"
+// boxes show and NEVER touches DSS, S_trend, or trend_signals. A query is KEPT only
+// when BOTH hold: (1) it has a positive football/jersey signal, and (2) it is not on
+// the junk/competitor/locality blocklist. Extend the arrays below to tune the boxes.
+
+// (1) Positive signal — generic jersey/football vocabulary (substring match).
+export const JERSEY_SIGNAL_TERMS: string[] = [
+  "jersey", "kit", "home", "away", "third", "retro", "world cup", "wc", "football", "2025", "2026",
+];
+
+// (2a) Junk / non-football nouns — drop if the query contains any of these.
+export const QUERY_JUNK_TERMS: string[] = [
+  "poison", "frog", "capital", "new jersey", "population", "weather",
+];
+
+// (2b) Competitor shop names — drop if the query contains any of these.
+export const COMPETITOR_NAMES: string[] = [
+  "jersey freak", "jersey champs",
+];
+
+// (2c) Dhaka-area / locality tokens — combined with a standalone "bd" marker these flag
+// a competitor-shop / locality query (e.g. "jersey freak bd khilgaon"). Extend freely.
+export const DHAKA_AREAS: string[] = [
+  "khilgaon", "mirpur", "dhanmondi", "mohakhali", "uttara", "bashundhara", "gulshan", "banani", "mohammadpur",
+];
+
+// (2d) Shop/commerce + info intent — drop even when the query contains "jersey", because
+// these are purchase-location or informational searches, NOT a stockable product (e.g.
+// "jersey shop near me", "ronaldo jersey number", "what is the capital of new jersey").
+// Extend freely as new junk patterns surface.
+export const QUERY_INTENT_JUNK: string[] = [
+  // shop / commerce intent
+  "shop", "store", "near me", "buy", "price", "cheap", "online", "delivery", "order",
+  "where to buy", "for sale", "outlet", "showroom",
+  // info / non-product intent
+  "number", "meaning", "size chart", "how to", "what is", "capital", "population", "wiki",
+];
+
+// Flattened tier-list signal tokens (full names + each >3-char token of every tracked
+// team / player / national team) so "messi", "argentina", "real madrid" count as a
+// positive signal. Reuses the existing TIER_LISTS — no duplication.
+const TIER_SIGNAL_TOKENS: string[] = (() => {
+  const out = new Set<string>();
+  for (const category of ["players", "clubs", "national"] as const) {
+    for (const tier of ["most", "mid", "low"] as const) {
+      for (const name of TIER_LISTS[category][tier]) {
+        const lower = name.toLowerCase();
+        out.add(lower);
+        for (const token of lower.split(/\s+/)) if (token.length > 3) out.add(token);
+      }
+    }
+  }
+  return [...out];
+})();
+
+// KEEP a related query only when it has a positive football/jersey signal AND is not
+// blocklisted. Pure + synchronous → safe to call at render time, never hits the network.
+export function isJerseyRelevantQuery(query: string): boolean {
+  const q = (query ?? "").toLowerCase().trim();
+  if (!q) return false;
+
+  // (2) Blocklist first — a junk/competitor/locality/intent hit drops the query outright.
+  if (QUERY_JUNK_TERMS.some((term) => q.includes(term))) return false;
+  if (COMPETITOR_NAMES.some((term) => q.includes(term))) return false;
+  // shop/commerce + info intent drops the query even if it mentions "jersey".
+  if (QUERY_INTENT_JUNK.some((term) => q.includes(term))) return false;
+  // standalone "bd" marker + any Dhaka-area token ⇒ competitor-shop locality query.
+  if (/\bbd\b/.test(q) && DHAKA_AREAS.some((area) => q.includes(area))) return false;
+
+  // (1) Positive signal — generic jersey vocab OR a tracked team/player/national name.
+  return (
+    JERSEY_SIGNAL_TERMS.some((term) => q.includes(term)) ||
+    TIER_SIGNAL_TOKENS.some((token) => q.includes(token))
+  );
 }
 
 // Cross-check a related query against current inventory text. Used to flag

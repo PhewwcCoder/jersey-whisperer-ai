@@ -39,7 +39,7 @@ const RETRO = { buy: 950, sell: 1290 };
 
 export const seedProducts: Product[] = [
   {
-    id: crypto.randomUUID(),
+    id: "seed-argentina-2026-home-player",
     product_name: "Argentina 2026 World Cup Version",
     team_country_club: "Argentina",
     player_name: "Messi",
@@ -64,7 +64,7 @@ export const seedProducts: Product[] = [
     ],
   },
   {
-    id: crypto.randomUUID(),
+    id: "seed-brazil-2026-away-player",
     product_name: "Brazil 2026 WC Away Kit",
     team_country_club: "Brazil",
     player_name: "Neymar",
@@ -89,7 +89,7 @@ export const seedProducts: Product[] = [
     ],
   },
   {
-    id: crypto.randomUUID(),
+    id: "seed-portugal-2026-away-player",
     product_name: "Portugal 2026 Away Kit",
     team_country_club: "Portugal",
     player_name: "Ronaldo",
@@ -110,7 +110,7 @@ export const seedProducts: Product[] = [
     variants: [mkVariant("L", 0, PLAYER.buy, PLAYER.sell, 3, true, futureDate(10))],
   },
   {
-    id: crypto.randomUUID(),
+    id: "seed-barcelona-2026-home-fan",
     product_name: "Barcelona 2026 Home Kit",
     team_country_club: "Barcelona",
     player_name: "Lamine Yamal",
@@ -135,7 +135,7 @@ export const seedProducts: Product[] = [
     ],
   },
   {
-    id: crypto.randomUUID(),
+    id: "seed-real-madrid-2026-home-fan",
     product_name: "Real Madrid 2026 Home Kit",
     team_country_club: "Real Madrid",
     player_name: "Bellingham",
@@ -159,7 +159,7 @@ export const seedProducts: Product[] = [
     ],
   },
   {
-    id: crypto.randomUUID(),
+    id: "seed-argentina-2006-retro",
     product_name: "Argentina 2006 Retro Kit",
     team_country_club: "Argentina",
     player_name: "Messi",
@@ -184,7 +184,7 @@ export const seedProducts: Product[] = [
     ],
   },
   {
-    id: crypto.randomUUID(),
+    id: "seed-brazil-2002-retro",
     product_name: "Brazil 2002 Retro Kit",
     team_country_club: "Brazil",
     player_name: "Neymar",
@@ -205,7 +205,7 @@ export const seedProducts: Product[] = [
     variants: [mkVariant("L", 4, RETRO.buy, RETRO.sell)],
   },
   {
-    id: crypto.randomUUID(),
+    id: "seed-bangladesh-2026-home-fan",
     product_name: "Bangladesh National Team Jersey 2026",
     team_country_club: "Bangladesh",
     font_name: "Blank / No print",

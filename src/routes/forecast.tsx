@@ -47,7 +47,7 @@ import {
   type StoredTrendSignal,
 } from "@/lib/supabase-service";
 import { useStore } from "@/lib/store";
-import { localTrendSignals } from "@/lib/trend-signals";
+import { localTrendSignals, matchQueryToTeam } from "@/lib/trend-signals";
 import {
   DEMO_GEO,
   emptyMarketDiscovery,
@@ -55,6 +55,7 @@ import {
   GEO_OPTIONS,
   geoName,
   isFresh,
+  isJerseyRelevantQuery,
   queryMatchesInventory,
   timeAgo,
   type MarketDiscovery,
@@ -62,7 +63,7 @@ import {
 import {
   ArrowUpRight,
   Database,
-  Globe,
+  Newspaper,
   RefreshCw,
   Search,
   Sparkles,
@@ -111,7 +112,19 @@ function ForecastPage() {
   const [geo, setGeo] = useState<string>(DEMO_GEO);
   const [geoStatus, setGeoStatus] = useState<"live" | "demo" | "empty">("demo");
   const [refreshing, setRefreshing] = useState(false);
+  const [newsRefreshing, setNewsRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState("Argentina 2XL player edition");
+  const [starRatings, setStarRatings] = useState<Record<string, number>>({});
+  // Per-card recommendation expand/collapse (in-memory, keyed by product id).
+  const [expandedRecs, setExpandedRecs] = useState<Set<string>>(new Set());
+
+  const toggleRec = (productId: string) =>
+    setExpandedRecs((prev) => {
+      const next = new Set(prev);
+      if (next.has(productId)) next.delete(productId);
+      else next.add(productId);
+      return next;
+    });
   const [methodologyOpen, setMethodologyOpen] = useState(false);
   const [technicalDetailsOpen, setTechnicalDetailsOpen] = useState("");
 
@@ -138,6 +151,16 @@ function ForecastPage() {
 
   const dataFresh = geoStatus === "live" && isFresh(liveFetchedAt);
 
+  // Dev-only gate for internal/debug text (e.g. the news source-provenance line). True in
+  // development, or in any build when the URL carries ?debug=1 — never in the normal
+  // customer view. Computed once on mount (location is stable for this page).
+  const [showDebug] = useState(
+    () =>
+      import.meta.env.DEV ||
+      (typeof window !== "undefined" &&
+        new URLSearchParams(window.location.search).get("debug") === "1"),
+  );
+
   // Lowercased inventory text for cross-checking related queries against what we stock.
   const inventoryText = useMemo(
     () =>
@@ -147,20 +170,8 @@ function ForecastPage() {
     [products],
   );
 
-  // Group geo-map markets by team for the "Top markets" card.
-  const geoByTeam = useMemo(() => {
-    const grouped = new Map<string, MarketDiscovery["geo"]>();
-    for (const entry of marketDiscovery.geo) {
-      const list = grouped.get(entry.team) ?? [];
-      list.push(entry);
-      grouped.set(entry.team, list);
-    }
-    return [...grouped.entries()].map(([team, markets]) => ({
-      team,
-      markets: [...markets].sort((a, b) => b.value - a.value).slice(0, 3),
-    }));
-  }, [marketDiscovery.geo]);
-
+  // Boxes 1 & 2 show the RAW SerpApi top / rising lists — no relevance filter, no tags.
+  // (The jersey-relevance call now lives only in Box 3's fallback path.)
   const relatedTop = useMemo(
     () =>
       marketDiscovery.related
@@ -176,6 +187,96 @@ function ForecastPage() {
         .sort((a, b) => b.score - a.score),
     [marketDiscovery.related],
   );
+
+  // Box 3 (AI Stock Picks) candidates: every raw top + rising query, deduped by text,
+  // scored by the (20/80 recency-blended) trend score. Memoized so the classify effect
+  // below only re-fires when the underlying queries actually change.
+  const stockCandidates = useMemo(() => {
+    const byQuery = new Map<string, { query: string; score: number }>();
+    for (const r of marketDiscovery.related) {
+      const key = r.query.trim().toLowerCase();
+      const existing = byQuery.get(key);
+      if (!existing || r.score > existing.score) byQuery.set(key, { query: r.query, score: r.score });
+    }
+    return [...byQuery.values()];
+  }, [marketDiscovery.related]);
+
+  // Gemini classification of the candidates (server-side, cached per query per day).
+  // null = use the deterministic rule-filter fallback (key missing / call failed / not
+  // yet loaded). Never blocks render; fetch failures simply leave us on the fallback.
+  const [jerseyClassifications, setJerseyClassifications] = useState<
+    { query: string; isJersey: boolean; team: string | null; kind: "national" | "club" | null }[] | null
+  >(null);
+  // Log-safe reason code (never a secret) for WHY Box 3 is on the rule fallback, surfaced
+  // as a badge tooltip. e.g. "gemini_key_missing", "gemini_http_429", "fetch_failed".
+  const [classifyReason, setClassifyReason] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const queries = stockCandidates.map((c) => c.query);
+    if (!queries.length) {
+      setJerseyClassifications([]);
+      setClassifyReason(null);
+      return;
+    }
+    (async () => {
+      try {
+        const res = await fetch("/api/classify-jerseys", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ queries }),
+        });
+        const data = (await res.json()) as {
+          ok?: boolean;
+          reason?: string;
+          classifications?:
+            | { query: string; isJersey: boolean; team: string | null; kind: "national" | "club" | null }[]
+            | null;
+        };
+        if (cancelled) return;
+        // ok + array → use AI verdicts; otherwise null → deterministic fallback.
+        if (data?.ok && Array.isArray(data.classifications)) {
+          setJerseyClassifications(data.classifications);
+          setClassifyReason(null);
+        } else {
+          setJerseyClassifications(null);
+          setClassifyReason(data?.reason ?? "classify_unavailable");
+        }
+      } catch (error) {
+        if (cancelled) return;
+        console.error("[classify-jerseys] fetch failed — using rule fallback:", error);
+        setJerseyClassifications(null);
+        setClassifyReason("fetch_failed");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [stockCandidates]);
+
+  // Box 3 picks: Gemini-verified team jerseys when available, else the deterministic
+  // isJerseyRelevantQuery() filter over the SAME candidates. Ranked by trend score.
+  const usingRuleFallback = jerseyClassifications === null;
+  const stockPicks = useMemo(() => {
+    const scoreByQuery = new Map(
+      stockCandidates.map((c) => [c.query.trim().toLowerCase(), c.score]),
+    );
+    let picks: { query: string; team: string | null; score: number }[];
+    if (jerseyClassifications) {
+      picks = jerseyClassifications
+        .filter((c) => c.isJersey)
+        .map((c) => ({
+          query: c.query,
+          team: c.team ?? matchQueryToTeam(c.query) ?? null,
+          score: scoreByQuery.get(c.query.trim().toLowerCase()) ?? 0,
+        }));
+    } else {
+      picks = stockCandidates
+        .filter((c) => isJerseyRelevantQuery(c.query))
+        .map((c) => ({ query: c.query, team: matchQueryToTeam(c.query) ?? null, score: c.score }));
+    }
+    return picks.sort((a, b) => b.score - a.score);
+  }, [jerseyClassifications, stockCandidates]);
 
   // Cache-only read for a geo. NEVER calls SerpApi — protects the 100-call/month quota.
   // Demo snapshot is only used for DEMO_GEO; other geos with no cache show an empty-state.
@@ -224,6 +325,8 @@ function ForecastPage() {
         body: JSON.stringify({ teams: REFRESH_TEAMS, geo }),
       });
       await loadGeoFromCache(geo);
+      // trends-refresh also refreshes news server-side; reload the box so it updates.
+      await reloadNews();
     } catch (error) {
       console.error("[trends-refresh] Refresh failed:", error);
     } finally {
@@ -234,15 +337,54 @@ function ForecastPage() {
   const forecasts = useMemo(() => {
     try {
       return products
-        .map((p) => forecastProduct(p, trendSignals, products, newsEvents))
+        .map((p) =>
+          forecastProduct(
+            { ...p, starRating: starRatings[p.id] },
+            trendSignals,
+            products,
+            newsEvents,
+          ),
+        )
         .sort((left, right) => right.demandSpikeScore - left.demandSpikeScore);
     } catch (error) {
       console.error("Forecast error:", error);
       return [];
     }
-  }, [products, trendSignals, newsEvents]);
+  }, [products, trendSignals, newsEvents, starRatings]);
 
   const topRecommendations = useMemo(() => forecasts.slice(0, 10), [forecasts]);
+
+  // Sports News Signals (display-only proof panel — reads the already-fetched
+  // newsEvents state; never re-fetches and never touches scoring). Newest first, max 12.
+  const newsSorted = useMemo(
+    () =>
+      [...newsEvents]
+        .sort(
+          (a, b) => new Date(b.event_date).getTime() - new Date(a.event_date).getTime(),
+        )
+        .slice(0, 12),
+    [newsEvents],
+  );
+
+  // Provenance for the "Source" footer: how many events came from live API-Football,
+  // from Bing-Copilot news (Gemini-parsed), vs the demo seed. Anything not tagged as
+  // a live source counts as demo.
+  const newsProvenance = useMemo(() => {
+    const apiFootball = newsEvents.filter((event) => event.source === "api_football").length;
+    const news = newsEvents.filter((event) => event.source === "google_ai_mode").length;
+    return { apiFootball, news, demo: newsEvents.length - apiFootball - news };
+  }, [newsEvents]);
+
+  // Most recent news write-time (news_events.created_at). The NewsEvent type omits
+  // created_at but select("*") returns it at runtime — read it via a local cast.
+  // Recomputes whenever newsEvents changes (i.e. after each refresh reload).
+  const newsRefreshedAt = useMemo(() => {
+    const times = newsEvents
+      .map((event) => (event as { created_at?: string }).created_at)
+      .filter((value): value is string => Boolean(value))
+      .sort();
+    return times.pop();
+  }, [newsEvents]);
 
   const productMatches = useMemo(
     () =>
@@ -260,12 +402,39 @@ function ForecastPage() {
     [searchQuery, technicalDetailsOpen],
   );
 
+  // Re-read news_events into state. Used on mount AND after any refresh so the
+  // Sports News box reflects newly-written events. Non-blocking, fail-safe.
+  async function reloadNews() {
+    if (!isSupabaseConfigured) return;
+    try {
+      const events = await fetchNewsEventsFromSupabase();
+      setNewsEvents(events);
+    } catch (error) {
+      console.error("[news] reload failed:", error);
+    }
+  }
+
+  // News-only refresh: triggers the server to pull API-Football transfers +
+  // Google AI Mode news, then reloads the box. Does NOT touch trends/SerpApi-trends.
+  async function handleNewsRefresh() {
+    setNewsRefreshing(true);
+    try {
+      await fetch("/api/news-only-refresh", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+      });
+      await reloadNews();
+    } catch (error) {
+      console.error("[news-only-refresh] Refresh failed:", error);
+    } finally {
+      setNewsRefreshing(false);
+    }
+  }
+
   // Fetch news events once on mount — non-blocking, S_news falls back to 0 if empty.
   useEffect(() => {
-    if (!isSupabaseConfigured) return;
-    fetchNewsEventsFromSupabase()
-      .then(setNewsEvents)
-      .catch(() => {});
+    void reloadNews();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // On mount AND whenever the seller switches geo: read that market's cache only.
@@ -359,59 +528,71 @@ function ForecastPage() {
               </Button>
             </div>
 
-            <div className="space-y-3">
-              {topRecommendations.map((forecast, index) => (
-                <div
-                  key={forecast.product_id}
-                  className="rounded-xl border border-border bg-background p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
-                >
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                    <div className="min-w-0 flex-1">
-                      <div className="mb-1 flex items-center gap-2">
-                        <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10 text-xs font-bold text-primary">
-                          #{index + 1}
-                        </div>
-                        <div className="truncate font-semibold text-foreground">
-                          {forecast.product_name} - {forecast.sizeLabel}
-                        </div>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+              {topRecommendations.map((forecast, index) => {
+                const expanded = expandedRecs.has(forecast.product_id);
+                return (
+                  <div
+                    key={forecast.product_id}
+                    className="flex flex-col rounded-xl border border-border bg-background p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
+                  >
+                    <div className="mb-1 flex items-start gap-2">
+                      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-bold text-primary">
+                        #{index + 1}
                       </div>
-                      <div className="text-sm text-muted-foreground">
-                        {forecast.team} - {forecast.typeLabel}
-                      </div>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <Badge variant="outline" className={forecast.urgencyColor}>
-                          Score: {forecast.demandSpikeScore}/100
-                        </Badge>
-                        <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20">
-                          Action: {formatActionLabel(forecast.action)}
-                        </Badge>
-                      </div>
-                      <div className="mt-3">
-                        <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                          Reasons
-                        </div>
-                        <ul className="mt-2 space-y-1 text-sm text-foreground/90">
-                          {buildSellerReasons(forecast).map((reason) => (
-                            <li key={reason}>- {reason}</li>
-                          ))}
-                        </ul>
+                      <div className="min-w-0 font-semibold text-foreground">
+                        {forecast.product_name} - {forecast.sizeLabel}
                       </div>
                     </div>
-
-                    <div className="w-full rounded-lg border border-border bg-muted/30 p-3 lg:max-w-[280px]">
+                    <div className="text-sm text-muted-foreground">
+                      {forecast.team} - {forecast.typeLabel}
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Badge variant="outline" className={forecast.urgencyColor}>
+                        Score: {forecast.demandSpikeScore}/100
+                      </Badge>
+                      <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20">
+                        Action: {formatActionLabel(forecast.action)}
+                      </Badge>
+                    </div>
+                    <div className="mt-3">
                       <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                        Recommendation
+                        Reasons
                       </div>
-                      <div className="mt-2 text-sm text-foreground/90">
-                        {forecast.recommendation}
-                      </div>
+                      <ul className="mt-2 space-y-1 text-sm text-foreground/90">
+                        {buildSellerReasons(forecast).map((reason) => (
+                          <li key={reason}>- {reason}</li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    {/* Recommendation collapses; pushed to the bottom of the card. */}
+                    <div className="mt-auto pt-3">
+                      <button
+                        type="button"
+                        onClick={() => toggleRec(forecast.product_id)}
+                        aria-expanded={expanded ? "true" : "false"}
+                        className="text-xs font-medium text-primary transition-colors hover:text-primary/80"
+                      >
+                        {expanded ? "Hide recommendation ▴" : "Show recommendation ▾"}
+                      </button>
+                      {expanded && (
+                        <div className="mt-2 rounded-lg border border-border bg-muted/30 p-3">
+                          <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                            Recommendation
+                          </div>
+                          <div className="mt-2 text-sm text-foreground/90">
+                            {forecast.recommendation}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
 
               {topRecommendations.length === 0 && (
-                <div className="rounded-lg border border-dashed border-border p-8 text-center text-muted-foreground">
+                <div className="rounded-lg border border-dashed border-border p-8 text-center text-muted-foreground md:col-span-2 lg:col-span-3">
                   No products are available yet for recommendation ranking.
                 </div>
               )}
@@ -461,20 +642,14 @@ function ForecastPage() {
               <div className="mt-1 text-xs text-muted-foreground">{provenanceText}</div>
             </div>
             <div className="flex shrink-0 flex-wrap items-center gap-2">
-              {/* Radix forbids value="" so Worldwide uses a "WW" sentinel; geo state keeps "". */}
-              <Select
-                value={geo || "WW"}
-                onValueChange={(value) => setGeo(value === "WW" ? "" : value)}
-                disabled={refreshing}
-              >
+              <Select value={geo} onValueChange={setGeo} disabled={refreshing}>
                 <SelectTrigger className="h-9 w-[170px]" aria-label="Select market">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   {GEO_OPTIONS.map((option) => (
-                    <SelectItem key={option.code || "WW"} value={option.code || "WW"}>
-                      {option.name}
-                      {option.code ? ` (${option.code})` : ""}
+                    <SelectItem key={option.code} value={option.code}>
+                      {option.name} ({option.code})
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -491,77 +666,129 @@ function ForecastPage() {
             </div>
           </div>
 
-          <div className="grid gap-6 lg:grid-cols-2">
-            <div>
-              <div className="mb-2 flex items-center gap-2">
-                <Sparkles className="h-4 w-4 text-primary" />
-                <div className="font-medium text-foreground">
-                  Top Jersey Searches in {geoName(geo)}
-                </div>
-              </div>
-              <div className="mb-3 text-xs text-muted-foreground">
-                Related queries for "jersey" · weighted recency: 60% last 24h + 40% last 7d · Rising = what to stock next.
-              </div>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <RelatedQueryList
-                  title="Top searches"
-                  icon={<Search className="h-3.5 w-3.5" />}
-                  items={relatedTop}
-                  inventoryText={inventoryText}
-                />
-                <RelatedQueryList
-                  title="Rising / What to Stock Next"
-                  icon={<ArrowUpRight className="h-3.5 w-3.5" />}
-                  items={relatedRising}
-                  inventoryText={inventoryText}
-                  highlightOpportunities
-                />
+          <div>
+            <div className="mb-2 flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-primary" />
+              <div className="font-medium text-foreground">
+                Top Jersey Searches in {geoName(geo)}
               </div>
             </div>
-
-            <div>
-              <div className="mb-2 flex items-center gap-2">
-                <Globe className="h-4 w-4 text-primary" />
-                <div className="font-medium text-foreground">Geographic Demand Map</div>
-              </div>
-              <div className="mb-3 text-xs text-muted-foreground">
-                Which countries search hardest for each kit — use to decide where to expand or ship.
-              </div>
-              <div className="space-y-4">
-                {geoByTeam.map(({ team, markets }) => {
-                  const max = Math.max(...markets.map((m) => m.value), 1);
-                  return (
-                    <div key={team}>
-                      <div className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                        Top markets — {team} jersey
-                      </div>
-                      <div className="space-y-1.5">
-                        {markets.map((market) => (
-                          <div key={`${team}-${market.location}`} className="flex items-center gap-2">
-                            <div className="w-28 shrink-0 truncate text-sm text-foreground/90">
-                              {market.location}
-                            </div>
-                            <Progress
-                              value={Math.round((market.value / max) * 100)}
-                              className="h-2 flex-1"
-                            />
-                            <div className="w-10 shrink-0 text-right font-mono text-xs text-muted-foreground">
-                              {market.value}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-                {geoByTeam.length === 0 && (
-                  <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-                    No data for {geoName(geo)} yet — click "Refresh trends" to fetch.
-                  </div>
-                )}
-              </div>
+            <div className="mb-3 text-xs text-muted-foreground">
+              Related queries for "jersey" · weighted recency: 20% last 24h + 80% last 7d · AI Stock Picks = what to stock next.
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <RelatedQueryList
+                title="Top searches"
+                icon={<Search className="h-3.5 w-3.5" />}
+                items={relatedTop}
+              />
+              <RelatedQueryList
+                title="Rising"
+                icon={<ArrowUpRight className="h-3.5 w-3.5" />}
+                items={relatedRising}
+              />
+              <StockPicksList
+                items={stockPicks}
+                inventoryText={inventoryText}
+                usingRuleFallback={usingRuleFallback}
+                fallbackReason={classifyReason}
+              />
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card className="mb-4">
+        <CardContent className="p-5">
+          <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Newspaper className="h-4 w-4 text-primary" />
+              <div>
+                <div className="font-semibold text-foreground">Sports News Signals</div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  Football events feeding the Sports News score (13% of demand score)
+                </div>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {newsRefreshedAt && (
+                <span className="text-xs text-muted-foreground">
+                  refreshed {timeAgo(newsRefreshedAt)}
+                </span>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleNewsRefresh}
+                disabled={newsRefreshing}
+              >
+                <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${newsRefreshing ? "animate-spin" : ""}`} />
+                {newsRefreshing ? "Refreshing…" : "Refresh news"}
+              </Button>
+            </div>
+          </div>
+
+          {newsSorted.length > 0 ? (
+            <>
+              <div className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                Recent Football Events
+              </div>
+              <div className="space-y-1.5">
+                {newsSorted.map((event) => (
+                  <div
+                    key={event.id}
+                    className="rounded-md border border-border bg-muted/30 px-3 py-2"
+                  >
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <Badge variant="outline" className={newsTypeBadgeClass(event.type)}>
+                        {newsTypeLabel(event.type)}
+                      </Badge>
+                      <div className="min-w-0 flex-1 text-sm text-foreground/90">
+                        {newsHeadline(event)}
+                      </div>
+                      <div className="text-xs text-muted-foreground">{newsBoostsText(event)}</div>
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <span className="rounded border border-border px-1.5 py-0.5 font-mono text-[10px] uppercase">
+                          {event.tier}
+                        </span>
+                        {newsEventDate(event) && (
+                          <span className="font-mono text-[10px]">{newsEventDate(event)}</span>
+                        )}
+                        <span className="w-14 text-right font-mono">{newsDaysAgo(event)}</span>
+                      </div>
+                    </div>
+                    {/* DISPLAY-ONLY AI demand color — does not affect any score. */}
+                    {event.context && (
+                      <div className="mt-1 text-xs italic text-muted-foreground/80">
+                        {event.context}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {/* Internal source-provenance line — dev/?debug=1 only, hidden from customers. */}
+              {showDebug && (
+                <div className="mt-3 border-t border-border pt-3 text-xs text-muted-foreground">
+                  {newsProvenance.apiFootball > 0 || newsProvenance.news > 0 ? (
+                    <>
+                      {`Live: ${newsProvenance.apiFootball} from API-Football, ${newsProvenance.news} from news, ${newsProvenance.demo} demo`}
+                      {newsProvenance.news > 0 && (
+                        <span className="ml-1">
+                          · news via Google AI Mode · DeepSeek (deepseek-v4-flash) primary, Gemini fallback
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    "Demo data — refresh to pull live API-Football + news events"
+                  )}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+              No sports events yet — click "Refresh trends" to pull live data.
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -586,6 +813,7 @@ function ForecastPage() {
                   <TableHead className="text-right">Recent inquiries</TableHead>
                   <TableHead className="text-right">Trend score</TableHead>
                   <TableHead className="text-right">Margin</TableHead>
+                  <TableHead className="text-center">Manual rating</TableHead>
                   <TableHead className="text-right">Demand Spike Score</TableHead>
                   <TableHead>Urgency label</TableHead>
                   <TableHead>Recommendation</TableHead>
@@ -604,6 +832,14 @@ function ForecastPage() {
                       {toPercent(forecast.breakdown.marketTrend)}
                     </TableCell>
                     <TableCell className="text-right font-mono">{forecast.marginPercent}%</TableCell>
+                    <TableCell className="text-center">
+                      <StarRating
+                        value={starRatings[forecast.product_id] ?? 0}
+                        onChange={(next) =>
+                          setStarRatings((prev) => ({ ...prev, [forecast.product_id]: next }))
+                        }
+                      />
+                    </TableCell>
                     <TableCell className="text-right font-mono">{forecast.demandSpikeScore}</TableCell>
                     <TableCell>
                       <Badge variant="outline" className={forecast.urgencyColor}>
@@ -691,25 +927,31 @@ function ForecastPage() {
             <div className="rounded-lg border border-border bg-muted/30 p-4">
               <div className="font-medium text-foreground">Demand Spike Score</div>
               <div className="mt-2 whitespace-pre-line text-muted-foreground">
-                {`32% Customer Conversation
-25% Market Trend
+                {`20–35% Customer Signal (queries + confirmed sales)
+20% Market Trend
 20% Stock Reduction Velocity
-15% Sports News
-8% Profit Margin`}
+13% Sports News
+7% Profit Margin
+5% Seller Rating`}
+              </div>
+              <div className="mt-2 text-xs text-muted-foreground/80">
+                DSS = 100 × Σwᵢ·Sᵢ (no normalization). The customer weight is 0.20 until a
+                confirmed purchase exists, then 0.35 — so a purchase unlocks the full 0–100
+                range (query-only caps at 85, no customer signal caps ~65).
               </div>
             </div>
 
             <MethodRow
-              title="Customer Conversation"
-              body="queries + confirmed sales, 14-day recency decay (w_query=1, w_sale=6)"
+              title="Customer Signal"
+              body="customer queries + confirmed sales, 14-day recency decay (saturating); weight 0.20 → 0.35 once a sale is confirmed"
             />
             <MethodRow
               title="Market Trend"
-              body="Live SerpApi Google Trends · 60% last-24h + 40% last-7d · geo-aware"
+              body="Live SerpApi Google Trends · 20% last-24h + 80% last-7d · geo-aware"
             />
             <MethodRow
               title="Stock Reduction Velocity"
-              body="days-of-supply urgency (14-day target cover)"
+              body="days-of-supply urgency from recent sales rate (14-day target cover)"
             />
             <MethodRow
               title="Sports News"
@@ -719,13 +961,10 @@ function ForecastPage() {
               title="Profit Margin"
               body="prioritizes profitable products when demand is healthy"
             />
-
-            <div className="rounded-lg border border-border bg-background p-4 text-muted-foreground">
-              For preliminary demo: Customer Conversation uses "Confirm order" button taps.
-              Production version adds NLP detection (EN/Banglish/Bangla confirmation phrases) + payment method mentions.
-              Stock Reduction uses old proxy; production adds trailing-14d units-sold tracking.
-              Sports News uses static rubric; production adds event tracking.
-            </div>
+            <MethodRow
+              title="Seller Rating"
+              body="seller's manual 1–5★ market read (stars ÷ 5)"
+            />
           </div>
         </SheetContent>
       </Sheet>
@@ -763,6 +1002,105 @@ function formatActionLabel(action: ReturnType<typeof forecastProduct>["action"])
   return "Hold / Monitor";
 }
 
+function StarRating({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (next: number) => void;
+}) {
+  return (
+    <div className="flex items-center justify-center gap-0.5">
+      {[1, 2, 3, 4, 5].map((star) => (
+        <button
+          key={star}
+          type="button"
+          aria-label={`Set rating to ${star}`}
+          onClick={() => onChange(value === star ? 0 : star)}
+          className={`text-base leading-none transition-colors ${
+            star <= value ? "text-amber-400" : "text-muted-foreground/30 hover:text-amber-300"
+          }`}
+        >
+          ★
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ── Sports News Signals helpers (display-only; no scoring) ────────────────────
+
+function newsTypeLabel(type: NewsEvent["type"]): string {
+  const labels: Record<NewsEvent["type"], string> = {
+    transfer: "transfer",
+    trophy: "trophy",
+    wc_final: "wc final",
+    kit_release: "kit release",
+    retirement: "retirement",
+    performance: "performance",
+  };
+  return labels[type] ?? type;
+}
+
+function newsTypeBadgeClass(type: NewsEvent["type"]): string {
+  const classes: Record<NewsEvent["type"], string> = {
+    transfer: "bg-sky-500/10 text-sky-600 border-sky-500/30 dark:text-sky-400",
+    trophy: "bg-amber-500/10 text-amber-600 border-amber-500/30 dark:text-amber-400",
+    wc_final: "bg-violet-500/10 text-violet-600 border-violet-500/30 dark:text-violet-400",
+    kit_release: "bg-emerald-500/10 text-emerald-600 border-emerald-500/30 dark:text-emerald-400",
+    retirement: "bg-rose-500/10 text-rose-600 border-rose-500/30 dark:text-rose-400",
+    performance: "bg-primary/10 text-primary border-primary/20",
+  };
+  return classes[type] ?? "bg-muted text-muted-foreground border-border";
+}
+
+// Compose a readable headline from whatever fields the row has. Never prints
+// "undefined" — falls back to the team when player/secondary are null.
+function newsHeadline(event: NewsEvent): string {
+  const player = event.player?.trim();
+  const team = event.team?.trim() || "Unknown team";
+  const secondary = event.secondary_team?.trim();
+  switch (event.type) {
+    case "transfer":
+      if (player && secondary) return `${player} → ${secondary}`;
+      if (player) return `${player} transfer (${team})`;
+      return secondary ? `${team} → ${secondary}` : `${team} transfer`;
+    case "trophy":
+      return `${team} won a trophy`;
+    case "performance":
+      return player ? `${player} notable performance (${team})` : `${team} notable performance`;
+    case "retirement":
+      return player ? `${player} retirement` : `${team} retirement`;
+    case "kit_release":
+      return `${team} new kit released`;
+    case "wc_final":
+      return `${team} in World Cup final`;
+    default:
+      return team;
+  }
+}
+
+function newsBoostsText(event: NewsEvent): string {
+  const team = event.team?.trim() || "—";
+  const secondary = event.secondary_team?.trim();
+  return secondary ? `boosts: ${team} + ${secondary}` : `boosts: ${team}`;
+}
+
+function newsDaysAgo(event: NewsEvent): string {
+  const then = new Date(event.event_date).getTime();
+  if (!Number.isFinite(then)) return "—";
+  const days = Math.floor((Date.now() - then) / 86400000);
+  if (days <= 0) return "today";
+  return `${days}d ago`;
+}
+
+// Absolute event date (e.g. "May 31") from the real, Gemini-extracted event_date.
+function newsEventDate(event: NewsEvent): string {
+  const d = new Date(event.event_date);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
 function MethodRow({ title, body }: { title: string; body: string }) {
   return (
     <div className="rounded-lg border border-border bg-background p-4">
@@ -772,18 +1110,15 @@ function MethodRow({ title, body }: { title: string; body: string }) {
   );
 }
 
+// Boxes 1 & 2 — RAW SerpApi terms + %. No relevance filter, no opportunity tag.
 function RelatedQueryList({
   title,
   icon,
   items,
-  inventoryText,
-  highlightOpportunities = false,
 }: {
   title: string;
   icon: ReactNode;
   items: { query: string; value: number; score: number; bucket: "top" | "rising" }[];
-  inventoryText: string[];
-  highlightOpportunities?: boolean;
 }) {
   return (
     <div>
@@ -792,17 +1127,88 @@ function RelatedQueryList({
         {title}
       </div>
       <div className="space-y-1.5">
+        {items.map((item) => (
+          <div
+            key={`${title}-${item.query}`}
+            className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-2.5 py-1.5"
+          >
+            <div className="min-w-0 truncate text-sm text-foreground/90">{item.query}</div>
+            <div className="shrink-0 font-mono text-xs text-muted-foreground">
+              {Math.round(item.score * 100)}%
+            </div>
+          </div>
+        ))}
+        {items.length === 0 && (
+          <div className="rounded-md border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+            No data yet.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Box 3 — AI Stock Picks. Gemini-verified team jerseys (or the deterministic rule
+// fallback when Gemini is unavailable), ranked by trend score. The "not stocked yet"
+// opportunity tag lives ONLY here, and only when the team isn't already in inventory.
+// Map a log-safe reason code to a human-readable, secret-free explanation for the badge
+// tooltip (so the demo makes clear WHY AI verification is off).
+function fallbackReasonLabel(reason: string | null): string {
+  if (reason === "demo_cache_empty")
+    return "Demo mode — no seeded classifications found; run scripts/seed-demo-cache.ts";
+  if (reason === "demo_mode") return "Demo mode — serving pre-seeded cached data";
+  if (reason === "openrouter_key_missing") return "OpenRouter key missing — add OPENROUTER_API_KEY to enable AI verification";
+  if (reason === "gemini_key_missing") return "Gemini key missing — add GEMINI_API_KEY to enable AI verification";
+  if (reason === "fetch_failed") return "Classifier request failed — using deterministic rule filter";
+  if (reason?.startsWith("openrouter_http_"))
+    return `OpenRouter returned ${reason.replace("openrouter_http_", "HTTP ")} — check OPENROUTER_MODEL in .env.local`;
+  if (reason === "openrouter_parse_failed") return "OpenRouter response unparseable — using rule filter";
+  if (reason?.startsWith("gemini_http_"))
+    return `Gemini returned ${reason.replace("gemini_http_", "HTTP ")} — using rule filter`;
+  if (reason === "gemini_parse_failed") return "Gemini response unparseable — using rule filter";
+  return "AI verification unavailable — using deterministic rule filter";
+}
+
+function StockPicksList({
+  items,
+  inventoryText,
+  usingRuleFallback,
+  fallbackReason,
+}: {
+  items: { query: string; team: string | null; score: number }[];
+  inventoryText: string[];
+  usingRuleFallback: boolean;
+  fallbackReason: string | null;
+}) {
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between gap-1.5">
+        <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          <Sparkles className="h-3.5 w-3.5" />
+          AI Stock Picks
+        </div>
+        <span
+          className="rounded-full border border-border px-1.5 py-0.5 text-[9px] uppercase text-muted-foreground/70"
+          title={
+            usingRuleFallback
+              ? fallbackReasonLabel(fallbackReason)
+              : "Picks verified by AI (OpenRouter → Gemini fallback)"
+          }
+        >
+          {usingRuleFallback ? "rule filter" : "AI-verified"}
+        </span>
+      </div>
+      <div className="space-y-1.5">
         {items.map((item) => {
           const stocked = queryMatchesInventory(item.query, inventoryText);
-          const showOpportunity = highlightOpportunities && !stocked;
           return (
             <div
-              key={`${title}-${item.query}`}
+              key={`pick-${item.query}`}
               className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-2.5 py-1.5"
             >
               <div className="min-w-0">
                 <div className="truncate text-sm text-foreground/90">{item.query}</div>
-                {showOpportunity && (
+                {!stocked && (
                   <div className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
                     opportunity — not stocked yet
                   </div>
@@ -816,7 +1222,7 @@ function RelatedQueryList({
         })}
         {items.length === 0 && (
           <div className="rounded-md border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
-            No data yet.
+            No stockable jersey picks yet.
           </div>
         )}
       </div>

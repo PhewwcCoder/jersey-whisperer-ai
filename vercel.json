@@ -1,8 +1,8 @@
 {
-  "devCommand": "vite --port $PORT --configLoader runner",
+  "devCommand": "vite --port $PORT",
   "buildCommand": "vite build --configLoader runner",
   "outputDirectory": "dist/client",
   "rewrites": [
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
+    { "source": "/((?!api/|@|.*\\.).*)", "destination": "/index.html" }
   ]
 }

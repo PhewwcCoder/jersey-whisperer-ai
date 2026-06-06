@@ -21,10 +21,13 @@ export interface ForecastResult {
   urgencyColor: string;
   breakdown: {
     customerConversation: number;
+    confirmedOrders: number;
+    customerQuery: number;
     marketTrend: number;
     stockReductionVelocity: number;
     sportsNews: number;
     profitMargin: number;
+    manualStar: number;
   };
   matchedTrendKeyword?: string;
   recommendation: string;
@@ -78,79 +81,132 @@ function getAverageMargin(variants: Variant[]) {
   return clamp01(totalMargin / valid.length);
 }
 
-function getStockReductionRate(stock: number) {
-  if (stock === 0) return 1;
-  if (stock <= 2) return 0.9;
-  if (stock <= 5) return 0.7;
-  if (stock <= 8) return 0.45;
-  return 0.2;
-}
-
-// Compute S_customer: recency-weighted conversation score (queries + confirmed sales).
-// RawC = sum of w * exp(-lambda * age_in_days)
-//   w_query=1, w_confirmed_sale=6, lambda=0.0495 (14-day half-life: ln(2)/14)
-// S_customer = RawC / (RawC + kappa), where kappa = median RawC across catalog.
+// Customer signal — ONE combined velocity score (the new DSS uses a single S_customer,
+// not the old sOrder/sQuery split). Every event contributes a recency-decayed magnitude:
+// a query = 1, a confirmed sale = its order quantity (>=1). Keeps the EXISTING logic:
+// 14-day recency decay (lambda = ln2/14) + the saturating form raw/(raw + kappa) with
+// kappa = median raw across the catalog. sOrder/sQuery are still computed separately,
+// purely to populate the breakdown display.
 // For DEMO: confirmed sale recorded when seller taps "Confirm order" button.
 // TODO: production = NLP detect seller confirmation phrases (EN/Banglish/Bangla:
 //       "confirmed","ok vai confirmed","apnar payment hoyeche","পেমেন্ট হয়েছে") +
-//       bKash/Nagad mention.
+//       bKash/Nagad mention, deduped to one confirmation per conversation thread.
 // Defaults to 0 (no demand signal) if no events.
-function computeCustomerConversationScore(
+const CONV_LAMBDA = 0.0495; // ln(2) / 14
+
+// Recency-decayed raw sum for a single bucket. `confirmed` selects which event type;
+// confirmed events use their quantity (>=1) as magnitude, queries use weight 1.
+function rawForBucket(events: Product["events"], confirmed: boolean, now: number): number {
+  let raw = 0;
+  for (const event of events ?? []) {
+    if (confirmed ? event.type !== "confirmed_sale" : event.type !== "query") continue;
+    const ageDays = (now - event.timestamp) / 86400000;
+    const magnitude = confirmed
+      ? (Number.isFinite(event.quantity) && (event.quantity as number) > 0 ? (event.quantity as number) : 1)
+      : 1;
+    raw += magnitude * Math.exp(-CONV_LAMBDA * ageDays);
+  }
+  return raw;
+}
+
+function medianOrDefault(values: number[], fallback: number): number {
+  if (!values.length) return fallback;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const med =
+    sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+  return med === 0 ? fallback : med;
+}
+
+function computeCustomerScores(
   product: Product,
   allProducts: Product[],
   now: number = Date.now(),
-) {
-  const LAMBDA = 0.0495; // ln(2) / 14
-  const events = product.events ?? [];
+): { sOrder: number; sQuery: number } {
+  const rawOrder = rawForBucket(product.events, true, now);
+  const rawQuery = rawForBucket(product.events, false, now);
 
-  let rawC = 0;
-  for (const event of events) {
-    const ageMs = now - event.timestamp;
-    const ageDays = ageMs / 86400000;
-    const weight = event.type === "confirmed_sale" ? 6 : 1;
-    rawC += weight * Math.exp(-LAMBDA * ageDays);
-  }
+  // kappa = median raw across the catalog, per bucket (saturation point).
+  const kappaOrder = medianOrDefault(
+    allProducts.map((p) => rawForBucket(p.events, true, now)),
+    5,
+  );
+  const kappaQuery = medianOrDefault(
+    allProducts.map((p) => rawForBucket(p.events, false, now)),
+    5,
+  );
 
-  // Compute median rawC across all products
-  const allRawCs = allProducts
-    .map((p) => {
-      const evts = p.events ?? [];
-      let rc = 0;
-      for (const e of evts) {
-        const ageMs = now - e.timestamp;
-        const ageDays = ageMs / 86400000;
-        const w = e.type === "confirmed_sale" ? 6 : 1;
-        rc += w * Math.exp(-LAMBDA * ageDays);
-      }
-      return rc;
-    })
-    .sort((a, b) => a - b);
-
-  let kappa = 5; // default fallback
-  if (allRawCs.length > 0) {
-    const mid = Math.floor(allRawCs.length / 2);
-    kappa = allRawCs.length % 2 === 0
-      ? (allRawCs[mid - 1] + allRawCs[mid]) / 2
-      : allRawCs[mid];
-    if (kappa === 0) kappa = 5;
-  }
-
-  return clamp01(rawC / (rawC + kappa));
+  return {
+    sOrder: clamp01(rawOrder / (rawOrder + kappaOrder)),
+    sQuery: clamp01(rawQuery / (rawQuery + kappaQuery)),
+  };
 }
 
-// Compute S_stock: stock reduction velocity (days-of-supply).
-// avg_daily_depletion = units_sold_trailing_14d / 14
-// DoS = stock_now / max(avg_daily_depletion, 1e-6)
-// S_stock = clamp(1 - DoS/14, 0, 1)  [DoS_target = 14 days cover]
-// Fallback to old proxy if units_sold unavailable.
-function computeStockReductionVelocity(product: Product) {
+// Combined recency-decayed velocity across BOTH event types (query + confirmed sale).
+// This is the single S_customer the new composite scores (one factor, variable weight).
+function rawCustomerVelocity(events: Product["events"], now: number): number {
+  return rawForBucket(events, true, now) + rawForBucket(events, false, now);
+}
+
+function computeCustomerScore(
+  product: Product,
+  allProducts: Product[],
+  now: number = Date.now(),
+): number {
+  const raw = rawCustomerVelocity(product.events, now);
+  // kappa = median combined raw across the catalog (same saturation point logic).
+  const kappa = medianOrDefault(
+    allProducts.map((p) => rawCustomerVelocity(p.events, now)),
+    5,
+  );
+  return clamp01(raw / (raw + kappa));
+}
+
+// A confirmed sale_event for the product flexes the customer weight 0.20 → 0.35
+// (deterministic + demo-safe). Phrase-based chat confirmation is what WRITES these
+// sale_events in production; the weight keys purely off their existence here.
+function hasConfirmedPurchase(product: Product): boolean {
+  return (product.events ?? []).some((event) => event.type === "confirmed_sale");
+}
+
+// Compute S_stock: stock-reduction urgency via days-of-supply, reacting to the RECENT
+// sales rate. The fix: avg_daily_sales divides units sold by the number of days the
+// product has ACTUALLY been selling (days_active), not a fixed 14 — so a product that
+// just started moving ("sold 2 yesterday, 4 left") reads a real ~2/day velocity instead
+// of being diluted to ~0 by the full window.
+//   days_active     = max(1, min(WINDOW_DAYS, days_since_first_sale_in_window))
+//   avg_daily_sales = units_sold_in_window / days_active
+//   DoS             = stock_now / max(avg_daily_sales, ε)
+//   S_stock         = clamp(1 - DoS / DOS_TARGET, 0, 1)   // DOS_TARGET = 14 (unchanged)
+// No recent sales → avg_daily_sales 0 → DoS huge → S_stock 0 (nothing is depleting).
+const STOCK_WINDOW_DAYS = 14;
+const DOS_TARGET = 14;
+const STOCK_EPSILON = 1e-6;
+
+function computeStockReductionVelocity(product: Product, now: number = Date.now()) {
   const variants = safeVariants(product);
   const stock = sumStock(variants);
 
-  // TODO: production = track units_sold_trailing_14d from order history.
-  // For DEMO: fall back to the old stock-reduction proxy.
-  const oldReduction = getStockReductionRate(stock);
-  return oldReduction;
+  const windowStart = now - STOCK_WINDOW_DAYS * 86400000;
+  let unitsSold = 0;
+  let firstSaleTs = Infinity;
+  for (const event of product.events ?? []) {
+    if (event.type !== "confirmed_sale") continue;
+    if (event.timestamp < windowStart) continue;
+    const qty =
+      Number.isFinite(event.quantity) && (event.quantity as number) > 0
+        ? (event.quantity as number)
+        : 1;
+    unitsSold += qty;
+    if (event.timestamp < firstSaleTs) firstSaleTs = event.timestamp;
+  }
+
+  const daysSinceFirstSale =
+    firstSaleTs === Infinity ? 0 : (now - firstSaleTs) / 86400000;
+  const daysActive = Math.max(1, Math.min(STOCK_WINDOW_DAYS, daysSinceFirstSale));
+  const avgDailySales = unitsSold / daysActive;
+  const dos = stock / Math.max(avgDailySales, STOCK_EPSILON);
+  return clamp01(1 - dos / DOS_TARGET);
 }
 
 function getDemandLabel(score: number): ForecastResult["demand"] {
@@ -287,16 +343,38 @@ export function calculateDemandSpikeScore(
   const averageMargin = getAverageMargin(variants);
   const bestTrend = getBestTrendForProduct(product, signals);
 
-  // New DSS model: DSS = 100 * (0.32*S_customer + 0.25*S_trend + 0.20*S_stock + 0.15*S_news + 0.08*S_margin)
-  const sCustomer = computeCustomerConversationScore(product, allProducts);
+  // DSS composite — NEW six-weight model, NO normalization: DSS = 100 × Σ(wᵢ·Sᵢ).
+  // The CUSTOMER weight flexes with purchase: 0.20 with no confirmed sale, 0.35 once a
+  // confirmed sale exists. This makes "a purchase unlock the full range" — and it is
+  // intentional:
+  //   • confirmed purchase → weights sum to exactly 1.00 → max DSS 100
+  //   • query-only         → weights sum to 0.85         → max DSS 85
+  //   • no customer signal → max DSS ~65 (trend+stock+news+margin+rating only)
+  // Frozen pieces are untouched: computeNewsScore, BASE_M, LAMBDA, tier lists.
+  const hasPurchase = hasConfirmedPurchase(product);
+  const W_CUSTOMER = hasPurchase ? 0.35 : 0.2; // flexes with a confirmed sale_event
+  const W_TREND = 0.2;
+  const W_STOCK = 0.2;
+  const W_NEWS = 0.13;
+  const W_MARGIN = 0.07;
+  const W_RATING = 0.05;
+
+  const sCustomer = computeCustomerScore(product, allProducts);
+  const { sOrder, sQuery } = computeCustomerScores(product, allProducts); // breakdown display only
   const sTrend = clamp01(getTrendScoreForProduct(product, signals));
   const sStock = computeStockReductionVelocity(product);
   const sNews = clamp01(computeNewsScore(product, newsEvents));
   const sMargin = clamp01(averageMargin / 0.5);
+  const sRating = product.starRating ? clamp01(product.starRating / 5) : 0;
 
-  const demandSpikeScore = Math.round(
-    (0.32 * sCustomer + 0.25 * sTrend + 0.20 * sStock + 0.15 * sNews + 0.08 * sMargin) * 100,
-  );
+  const weighted =
+    W_CUSTOMER * sCustomer +
+    W_TREND * sTrend +
+    W_STOCK * sStock +
+    W_NEWS * sNews +
+    W_MARGIN * sMargin +
+    W_RATING * sRating;
+  const demandSpikeScore = Math.round(weighted * 100); // no normalization — see comment above
 
   const urgency = getUrgency(demandSpikeScore);
   const prioritySizes = getPrioritySizes(variants);
@@ -312,11 +390,16 @@ export function calculateDemandSpikeScore(
     urgencyLabel: urgency.label,
     urgencyColor: urgency.color,
     breakdown: {
+      // customerConversation = the single combined S_customer scored by the composite;
+      // confirmedOrders / customerQuery stay as the split sub-buckets (display only).
       customerConversation: sCustomer,
+      confirmedOrders: sOrder,
+      customerQuery: sQuery,
       marketTrend: sTrend,
       stockReductionVelocity: sStock,
       sportsNews: sNews,
       profitMargin: sMargin,
+      manualStar: sRating,
     },
     matchedTrendKeyword: bestTrend?.keyword,
     recommendation,

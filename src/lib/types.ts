@@ -57,6 +57,8 @@ export interface Variant {
 export interface CustomerEvent {
   type: "query" | "confirmed_sale";
   timestamp: number;
+  // Confirmed-order magnitude (units). Used by S_order; defaults to 1 when unknown.
+  quantity?: number;
 }
 
 export interface Product {
@@ -81,6 +83,7 @@ export interface Product {
   created_at: string;
   variants: Variant[];
   events?: CustomerEvent[];
+  starRating?: number; // 1–5, seller-set manual market read
 }
 
 export interface FallbackMatch {
