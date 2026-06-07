@@ -6,8 +6,9 @@ import { QueryClient } from "@tanstack/react-query";
 import { routeTree } from "./routeTree.gen";
 import "./styles.css";
 
+// Premium dark analytics theme is the default; only an explicit "light" opt-out disables it.
 const theme = window.localStorage.getItem("jerseybecho_theme");
-if (theme === "dark") {
+if (theme !== "light") {
   document.documentElement.classList.add("dark");
 }
 

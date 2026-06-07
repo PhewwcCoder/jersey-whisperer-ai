@@ -1,6 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { PageHeader } from "@/components/AppShell";
 import {
   Accordion,
   AccordionContent,
@@ -61,13 +60,15 @@ import {
   type MarketDiscovery,
 } from "@/lib/market-signals";
 import {
+  AlertTriangle,
   ArrowUpRight,
   Database,
+  Gauge,
   Newspaper,
   RefreshCw,
+  Radio,
   Search,
   Sparkles,
-  TrendingUp,
 } from "lucide-react";
 
 export const Route = createFileRoute("/forecast")({
@@ -505,63 +506,143 @@ function ForecastPage() {
     return insights.slice(0, 5);
   }, [forecasts, products, trendSignals]);
 
+  // KPI strip — pure presentational reads of already-computed data (no scoring/logic).
+  const criticalCount = forecasts.filter(
+    (f) => f.urgencyLabel === "CRITICAL RESTOCK REQUIRED",
+  ).length;
+  const topScore = forecasts.length
+    ? Math.max(...forecasts.map((f) => f.demandSpikeScore))
+    : 0;
+  const liveSignalCount = relatedTop.length + relatedRising.length;
+  const sportsCount = newsSorted.length;
+
   return (
     <>
-      <PageHeader
-        title="Forecast Preview"
-        subtitle="Use demand signals to decide what to restock, promote, or hold this week"
-      />
+      {/* Premium status header with live / demo-mode indicator */}
+      <div className="mb-5 flex flex-col gap-4 border-b border-border/60 pb-5 sm:flex-row sm:items-end sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="text-2xl font-bold tracking-tight text-foreground md:text-[28px]">
+              Demand Forecast
+            </h1>
+            <StatusIndicator status={geoStatus} fresh={dataFresh} fetchedAt={liveFetchedAt} />
+          </div>
+          <p className="mt-1.5 max-w-2xl text-sm text-muted-foreground">
+            Real-time demand signals to decide what to restock, promote, or hold this week.
+          </p>
+        </div>
+        <div className="shrink-0 text-xs text-muted-foreground sm:text-right">{provenanceText}</div>
+      </div>
+
+      {/* KPI strip */}
+      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <KpiCard
+          label="Critical restocks"
+          value={criticalCount}
+          sub="demand score ≥ 80"
+          tone="danger"
+          icon={<AlertTriangle className="h-4 w-4" />}
+        />
+        <KpiCard
+          label="Top demand score"
+          value={topScore}
+          sub="out of 100"
+          tone="primary"
+          icon={<Gauge className="h-4 w-4" />}
+        />
+        <KpiCard
+          label="Live market signals"
+          value={liveSignalCount}
+          sub="top + rising queries"
+          tone="accent"
+          icon={<Radio className="h-4 w-4" />}
+        />
+        <KpiCard
+          label="Sports events"
+          value={sportsCount}
+          sub="feeding S_news"
+          tone="info"
+          icon={<Newspaper className="h-4 w-4" />}
+        />
+      </div>
 
       <div className="mb-4 grid gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(340px,0.7fr)]">
-        <Card className="border-primary/20">
+        <Card className="panel-sheen border-border/70">
           <CardContent className="p-5">
             <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <div className="font-semibold text-foreground">Top 10 Product Recommendations</div>
-                <div className="mt-1 text-sm text-muted-foreground">
-                  AI-ranked actions from your inventory, market demand, sports news, customer queries,
-                  stock movement, and profit margin.
-                </div>
-              </div>
-              <Button variant="outline" onClick={() => setMethodologyOpen(true)}>
+              <SectionTitle
+                icon={<Gauge className="h-4 w-4" />}
+                title="Top 10 Product Recommendations"
+                subtitle="AI-ranked actions from inventory, market demand, sports news, customer queries, stock movement, and margin."
+              />
+              <Button variant="outline" size="sm" onClick={() => setMethodologyOpen(true)}>
                 How is the score calculated?
               </Button>
             </div>
 
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
               {topRecommendations.map((forecast, index) => {
                 const expanded = expandedRecs.has(forecast.product_id);
                 return (
                   <div
                     key={forecast.product_id}
-                    className="flex flex-col rounded-xl border border-border bg-background p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
+                    className="card-hover flex flex-col rounded-xl border border-border bg-background/60 p-4 hover:border-primary/30"
                   >
-                    <div className="mb-1 flex items-start gap-2">
-                      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-bold text-primary">
-                        #{index + 1}
+                    <div className="mb-2 flex items-start gap-2.5">
+                      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-accent font-mono text-xs font-bold text-primary-foreground shadow-sm">
+                        {index + 1}
                       </div>
-                      <div className="min-w-0 font-semibold text-foreground">
-                        {forecast.product_name} - {forecast.sizeLabel}
+                      <div className="min-w-0">
+                        <div className="truncate font-semibold leading-tight text-foreground">
+                          {forecast.product_name}
+                        </div>
+                        <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                          {forecast.team} · {forecast.typeLabel} · {forecast.sizeLabel}
+                        </div>
                       </div>
                     </div>
-                    <div className="text-sm text-muted-foreground">
-                      {forecast.team} - {forecast.typeLabel}
+
+                    {/* DSS strength bar — presentational view of demandSpikeScore. */}
+                    <div className="mb-3 mt-1">
+                      <div className="mb-1 flex items-baseline justify-between">
+                        <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                          Demand score
+                        </span>
+                        <span className="font-mono text-sm font-semibold tabular-nums text-foreground">
+                          {forecast.demandSpikeScore}
+                          <span className="text-[10px] text-muted-foreground">/100</span>
+                        </span>
+                      </div>
+                      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-primary to-accent transition-all duration-500"
+                          style={{ width: `${Math.min(100, Math.max(0, forecast.demandSpikeScore))}%` }}
+                        />
+                      </div>
                     </div>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      <Badge variant="outline" className={forecast.urgencyColor}>
-                        Score: {forecast.demandSpikeScore}/100
+
+                    <div className="flex flex-wrap gap-1.5">
+                      <Badge variant="outline" className={`text-[10px] ${forecast.urgencyColor}`}>
+                        {forecast.urgencyLabel}
                       </Badge>
-                      <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20">
-                        Action: {formatActionLabel(forecast.action)}
+                      <Badge
+                        variant="outline"
+                        className="border-primary/20 bg-primary/10 text-[10px] text-primary"
+                      >
+                        {formatActionLabel(forecast.action)}
                       </Badge>
                     </div>
+
                     <div className="mt-3">
-                      <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                        Reasons
+                      <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                        Why
                       </div>
-                      <ul className="mt-2 space-y-1 text-sm text-foreground/90">
+                      <ul className="mt-1.5 space-y-1 text-[13px] text-foreground/85">
                         {buildSellerReasons(forecast).map((reason) => (
-                          <li key={reason}>- {reason}</li>
+                          <li key={reason} className="flex gap-1.5">
+                            <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-primary/60" aria-hidden />
+                            <span>{reason}</span>
+                          </li>
                         ))}
                       </ul>
                     </div>
@@ -572,16 +653,16 @@ function ForecastPage() {
                         type="button"
                         onClick={() => toggleRec(forecast.product_id)}
                         aria-expanded={expanded ? "true" : "false"}
-                        className="text-xs font-medium text-primary transition-colors hover:text-primary/80"
+                        className="cursor-pointer text-xs font-medium text-primary transition-colors hover:text-primary/80"
                       >
                         {expanded ? "Hide recommendation ▴" : "Show recommendation ▾"}
                       </button>
                       {expanded && (
                         <div className="mt-2 rounded-lg border border-border bg-muted/30 p-3">
-                          <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                          <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                             Recommendation
                           </div>
-                          <div className="mt-2 text-sm text-foreground/90">
+                          <div className="mt-1.5 text-[13px] text-foreground/90">
                             {forecast.recommendation}
                           </div>
                         </div>
@@ -600,19 +681,22 @@ function ForecastPage() {
           </CardContent>
         </Card>
 
-        <Card className="border-primary/20 bg-gradient-to-br from-primary/10 via-background to-accent/10">
+        <Card className="panel-sheen border-primary/20 bg-gradient-to-br from-primary/10 via-card to-accent/10">
           <CardContent className="p-5">
-            <div className="mb-3 flex items-center gap-2">
-              <TrendingUp className="h-4 w-4 text-primary" />
+            <div className="mb-3 flex items-center gap-2.5">
+              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/20">
+                <Sparkles className="h-4 w-4" />
+              </div>
               <div className="font-semibold text-foreground">What You Might Be Missing</div>
             </div>
-            <div className="space-y-3">
+            <div className="space-y-2.5">
               {missedInsights.map((insight) => (
                 <div
                   key={insight}
-                  className="rounded-lg border border-border bg-background/80 p-3 text-sm text-foreground/90"
+                  className="flex gap-2 rounded-lg border border-border bg-background/60 p-3 text-[13px] text-foreground/90"
                 >
-                  {insight}
+                  <ArrowUpRight className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                  <span>{insight}</span>
                 </div>
               ))}
               {missedInsights.length === 0 && (
@@ -625,21 +709,18 @@ function ForecastPage() {
         </Card>
       </div>
 
-      <Card className="mb-4">
+      <Card className="panel-sheen mb-4 border-border/70">
         <CardContent className="p-5">
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <div>
-              <div className="flex items-center gap-2">
-                <TrendingUp className="h-4 w-4 text-primary" />
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent/10 text-accent ring-1 ring-accent/20">
+                  <Radio className="h-4 w-4" />
+                </div>
                 <span className="font-semibold text-foreground">Live Market Signals</span>
-                {dataFresh && (
-                  <span className="flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-600 dark:text-emerald-400">
-                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" aria-hidden />
-                    Live
-                  </span>
-                )}
+                <StatusIndicator status={geoStatus} fresh={dataFresh} fetchedAt={liveFetchedAt} />
               </div>
-              <div className="mt-1 text-xs text-muted-foreground">{provenanceText}</div>
+              <div className="mt-1 pl-9 text-xs text-muted-foreground">{provenanceText}</div>
             </div>
             <div className="flex shrink-0 flex-wrap items-center gap-2">
               <Select value={geo} onValueChange={setGeo} disabled={refreshing}>
@@ -698,18 +779,14 @@ function ForecastPage() {
         </CardContent>
       </Card>
 
-      <Card className="mb-4">
+      <Card className="panel-sheen mb-4 border-border/70">
         <CardContent className="p-5">
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <Newspaper className="h-4 w-4 text-primary" />
-              <div>
-                <div className="font-semibold text-foreground">Sports News Signals</div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  Football events feeding the Sports News score (13% of demand score)
-                </div>
-              </div>
-            </div>
+            <SectionTitle
+              icon={<Newspaper className="h-4 w-4" />}
+              title="Sports News Signals"
+              subtitle="Football events feeding the Sports News score (13% of demand score)"
+            />
             <div className="flex shrink-0 items-center gap-2">
               {newsRefreshedAt && (
                 <span className="text-xs text-muted-foreground">
@@ -730,31 +807,40 @@ function ForecastPage() {
 
           {newsSorted.length > 0 ? (
             <>
-              <div className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                 Recent Football Events
               </div>
-              <div className="space-y-1.5">
+              <div className="space-y-1">
                 {newsSorted.map((event) => (
                   <div
                     key={event.id}
-                    className="rounded-md border border-border bg-muted/30 px-3 py-2"
+                    className="rounded-lg border border-border/60 bg-background/40 px-3 py-2 transition-colors hover:border-border hover:bg-muted/30"
                   >
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                      <Badge variant="outline" className={newsTypeBadgeClass(event.type)}>
+                      <Badge
+                        variant="outline"
+                        className={`text-[10px] ${newsTypeBadgeClass(event.type)}`}
+                      >
                         {newsTypeLabel(event.type)}
                       </Badge>
-                      <div className="min-w-0 flex-1 text-sm text-foreground/90">
+                      <div className="min-w-0 flex-1 text-[13px] font-medium text-foreground/90">
                         {newsHeadline(event)}
                       </div>
-                      <div className="text-xs text-muted-foreground">{newsBoostsText(event)}</div>
+                      <div className="hidden text-xs text-muted-foreground sm:block">
+                        {newsBoostsText(event)}
+                      </div>
                       <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <span className="rounded border border-border px-1.5 py-0.5 font-mono text-[10px] uppercase">
+                        <span className="rounded border border-border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide">
                           {event.tier}
                         </span>
                         {newsEventDate(event) && (
-                          <span className="font-mono text-[10px]">{newsEventDate(event)}</span>
+                          <span className="font-mono text-[10px] tabular-nums">
+                            {newsEventDate(event)}
+                          </span>
                         )}
-                        <span className="w-14 text-right font-mono">{newsDaysAgo(event)}</span>
+                        <span className="w-14 text-right font-mono text-[10px] tabular-nums">
+                          {newsDaysAgo(event)}
+                        </span>
                       </div>
                     </div>
                     {/* DISPLAY-ONLY AI demand color — does not affect any score. */}
@@ -792,46 +878,55 @@ function ForecastPage() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardContent className="p-0 overflow-x-auto">
+      <Card className="panel-sheen border-border/70">
+        <CardContent className="overflow-x-auto p-0">
           <div className="border-b border-border px-5 py-4">
-            <div className="font-semibold text-foreground">Demand Spike Score Table</div>
-            <div className="text-xs text-muted-foreground">
-              Product scoring uses demand signals, stock movement, margin, and customer interest.
-            </div>
+            <SectionTitle
+              icon={<Gauge className="h-4 w-4" />}
+              title="Demand Spike Score Table"
+              subtitle="Per-product DSS from demand signals, stock movement, margin, and customer interest."
+            />
           </div>
 
           {forecasts.length > 0 ? (
             <Table>
-              <TableHeader>
+              <TableHeader className="[&_th]:h-10 [&_th]:bg-muted/40 [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:tracking-wider [&_th]:text-muted-foreground">
                 <TableRow>
                   <TableHead>Product</TableHead>
                   <TableHead>Team</TableHead>
                   <TableHead>Type</TableHead>
                   <TableHead>Size</TableHead>
                   <TableHead className="text-right">Stock</TableHead>
-                  <TableHead className="text-right">Recent inquiries</TableHead>
-                  <TableHead className="text-right">Trend score</TableHead>
+                  <TableHead className="text-right">Inquiries</TableHead>
+                  <TableHead className="text-right">Trend</TableHead>
                   <TableHead className="text-right">Margin</TableHead>
-                  <TableHead className="text-center">Manual rating</TableHead>
-                  <TableHead className="text-right">Demand Spike Score</TableHead>
-                  <TableHead>Urgency label</TableHead>
+                  <TableHead className="text-center">Rating</TableHead>
+                  <TableHead className="text-right">DSS</TableHead>
+                  <TableHead>Urgency</TableHead>
                   <TableHead>Recommendation</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {forecasts.map((forecast) => (
                   <TableRow key={forecast.product_id}>
-                    <TableCell className="font-medium">{forecast.product_name}</TableCell>
-                    <TableCell>{forecast.team}</TableCell>
-                    <TableCell>{forecast.typeLabel}</TableCell>
+                    <TableCell className="font-medium text-foreground">
+                      {forecast.product_name}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">{forecast.team}</TableCell>
+                    <TableCell className="text-muted-foreground">{forecast.typeLabel}</TableCell>
                     <TableCell className="font-mono text-xs">{forecast.sizeLabel}</TableCell>
-                    <TableCell className="text-right font-mono">{forecast.stock}</TableCell>
-                    <TableCell className="text-right font-mono">{forecast.recentInquiries}</TableCell>
-                    <TableCell className="text-right font-mono">
+                    <TableCell className="text-right font-mono tabular-nums">
+                      {forecast.stock}
+                    </TableCell>
+                    <TableCell className="text-right font-mono tabular-nums">
+                      {forecast.recentInquiries}
+                    </TableCell>
+                    <TableCell className="text-right font-mono tabular-nums">
                       {toPercent(forecast.breakdown.marketTrend)}
                     </TableCell>
-                    <TableCell className="text-right font-mono">{forecast.marginPercent}%</TableCell>
+                    <TableCell className="text-right font-mono tabular-nums">
+                      {forecast.marginPercent}%
+                    </TableCell>
                     <TableCell className="text-center">
                       <StarRating
                         value={starRatings[forecast.product_id] ?? 0}
@@ -840,13 +935,30 @@ function ForecastPage() {
                         }
                       />
                     </TableCell>
-                    <TableCell className="text-right font-mono">{forecast.demandSpikeScore}</TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <div className="hidden h-1.5 w-12 overflow-hidden rounded-full bg-muted lg:block">
+                          <div
+                            className="h-full rounded-full bg-gradient-to-r from-primary to-accent"
+                            style={{
+                              width: `${Math.min(100, Math.max(0, forecast.demandSpikeScore))}%`,
+                            }}
+                          />
+                        </div>
+                        <span className="font-mono text-sm font-semibold tabular-nums text-foreground">
+                          {forecast.demandSpikeScore}
+                        </span>
+                      </div>
+                    </TableCell>
                     <TableCell>
-                      <Badge variant="outline" className={forecast.urgencyColor}>
+                      <Badge
+                        variant="outline"
+                        className={`whitespace-nowrap text-[10px] ${forecast.urgencyColor}`}
+                      >
                         {forecast.urgencyLabel}
                       </Badge>
                     </TableCell>
-                    <TableCell className="min-w-[280px] text-sm text-foreground/90">
+                    <TableCell className="min-w-[280px] text-[13px] text-foreground/90">
                       <div>{forecast.recommendation}</div>
                       {forecast.matchedTrendKeyword && (
                         <div className="mt-1 text-xs text-muted-foreground">
@@ -1121,20 +1233,33 @@ function RelatedQueryList({
   items: { query: string; value: number; score: number; bucket: "top" | "rising" }[];
 }) {
   return (
-    <div>
-      <div className="mb-2 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-        {icon}
-        {title}
+    <div className="rounded-xl border border-border bg-background/40 p-3">
+      <div className="mb-2.5 flex items-center justify-between">
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          {icon}
+          {title}
+        </div>
+        <span className="font-mono text-[10px] tabular-nums text-muted-foreground/70">
+          {items.length}
+        </span>
       </div>
-      <div className="space-y-1.5">
+      <div className="space-y-1">
         {items.map((item) => (
           <div
             key={`${title}-${item.query}`}
-            className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-2.5 py-1.5"
+            className="relative overflow-hidden rounded-md border border-border/60 bg-card px-2.5 py-1.5"
           >
-            <div className="min-w-0 truncate text-sm text-foreground/90">{item.query}</div>
-            <div className="shrink-0 font-mono text-xs text-muted-foreground">
-              {Math.round(item.score * 100)}%
+            {/* Score data-bar behind the label. */}
+            <div
+              className="absolute inset-y-0 left-0 bg-primary/10"
+              style={{ width: `${Math.round(item.score * 100)}%` }}
+              aria-hidden
+            />
+            <div className="relative flex items-center justify-between gap-2">
+              <div className="min-w-0 truncate text-[13px] text-foreground/90">{item.query}</div>
+              <div className="shrink-0 font-mono text-xs font-medium tabular-nums text-foreground">
+                {Math.round(item.score * 100)}%
+              </div>
             </div>
           </div>
         ))}
@@ -1181,14 +1306,18 @@ function StockPicksList({
   fallbackReason: string | null;
 }) {
   return (
-    <div>
-      <div className="mb-2 flex items-center justify-between gap-1.5">
-        <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+    <div className="rounded-xl border border-primary/25 bg-primary/[0.04] p-3">
+      <div className="mb-2.5 flex items-center justify-between gap-1.5">
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-primary">
           <Sparkles className="h-3.5 w-3.5" />
           AI Stock Picks
         </div>
         <span
-          className="rounded-full border border-border px-1.5 py-0.5 text-[9px] uppercase text-muted-foreground/70"
+          className={`cursor-help rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
+            usingRuleFallback
+              ? "border-border bg-muted text-muted-foreground"
+              : "border-success/30 bg-success/10 text-success"
+          }`}
           title={
             usingRuleFallback
               ? fallbackReasonLabel(fallbackReason)
@@ -1198,24 +1327,32 @@ function StockPicksList({
           {usingRuleFallback ? "rule filter" : "AI-verified"}
         </span>
       </div>
-      <div className="space-y-1.5">
+      <div className="space-y-1">
         {items.map((item) => {
           const stocked = queryMatchesInventory(item.query, inventoryText);
           return (
             <div
               key={`pick-${item.query}`}
-              className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-2.5 py-1.5"
+              className="relative overflow-hidden rounded-md border border-border/60 bg-card px-2.5 py-1.5"
             >
-              <div className="min-w-0">
-                <div className="truncate text-sm text-foreground/90">{item.query}</div>
-                {!stocked && (
-                  <div className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
-                    opportunity — not stocked yet
-                  </div>
-                )}
-              </div>
-              <div className="shrink-0 font-mono text-xs text-muted-foreground">
-                {Math.round(item.score * 100)}%
+              <div
+                className="absolute inset-y-0 left-0 bg-primary/10"
+                style={{ width: `${Math.round(item.score * 100)}%` }}
+                aria-hidden
+              />
+              <div className="relative flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="truncate text-[13px] text-foreground/90">{item.query}</div>
+                  {!stocked && (
+                    <div className="flex items-center gap-1 text-[10px] font-medium text-success">
+                      <span className="h-1 w-1 rounded-full bg-success" aria-hidden />
+                      opportunity — not stocked yet
+                    </div>
+                  )}
+                </div>
+                <div className="shrink-0 font-mono text-xs font-medium tabular-nums text-foreground">
+                  {Math.round(item.score * 100)}%
+                </div>
               </div>
             </div>
           );
@@ -1254,6 +1391,116 @@ function SemanticPanel({ title, items }: { title: string; items: SemanticSearchH
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// Premium panel header — accent icon chip + title + optional subtitle.
+function SectionTitle({
+  icon,
+  title,
+  subtitle,
+}: {
+  icon: ReactNode;
+  title: string;
+  subtitle?: string;
+}) {
+  return (
+    <div className="flex items-start gap-2.5">
+      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/20">
+        {icon}
+      </div>
+      <div>
+        <div className="font-semibold leading-tight text-foreground">{title}</div>
+        {subtitle && <div className="mt-1 max-w-xl text-xs text-muted-foreground">{subtitle}</div>}
+      </div>
+    </div>
+  );
+}
+
+// Live / demo-mode status pill — presents the existing geoStatus (no new data logic).
+function StatusIndicator({
+  status,
+  fresh,
+  fetchedAt,
+}: {
+  status: "live" | "demo" | "empty";
+  fresh: boolean;
+  fetchedAt?: string;
+}) {
+  if (status === "live") {
+    return (
+      <span className="inline-flex items-center gap-2 rounded-full border border-success/30 bg-success/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-success">
+        <span className="status-dot h-1.5 w-1.5 rounded-full bg-success" aria-hidden />
+        Live
+        {fresh && fetchedAt && (
+          <span className="font-normal normal-case tracking-normal text-success/70">
+            {timeAgo(fetchedAt)}
+          </span>
+        )}
+      </span>
+    );
+  }
+  if (status === "demo") {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-warning">
+        <span className="h-1.5 w-1.5 rounded-full bg-warning" aria-hidden />
+        Demo data
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+      <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60" aria-hidden />
+      No data
+    </span>
+  );
+}
+
+// Headline KPI tile — large mono numeral, tone-colored accent chip. Presentational.
+function KpiCard({
+  label,
+  value,
+  sub,
+  tone,
+  icon,
+}: {
+  label: string;
+  value: number;
+  sub: string;
+  tone: "primary" | "danger" | "accent" | "info";
+  icon: ReactNode;
+}) {
+  const text = {
+    primary: "text-primary",
+    danger: "text-destructive",
+    accent: "text-accent",
+    info: "text-info",
+  }[tone];
+  const chip = {
+    primary: "bg-primary/10 ring-primary/20",
+    danger: "bg-destructive/10 ring-destructive/20",
+    accent: "bg-accent/10 ring-accent/20",
+    info: "bg-info/10 ring-info/20",
+  }[tone];
+  return (
+    <div className="card-hover panel-sheen relative overflow-hidden rounded-xl border border-border bg-card p-4">
+      <div className="flex items-start justify-between gap-2">
+        <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          {label}
+        </div>
+        <div className={`flex h-7 w-7 items-center justify-center rounded-lg ring-1 ${chip} ${text}`}>
+          {icon}
+        </div>
+      </div>
+      <div
+        className={`mt-2.5 font-mono text-3xl font-semibold tabular-nums ${text} ${
+          tone === "primary" ? "glow-primary" : ""
+        }`}
+      >
+        {value}
+      </div>
+      <div className="mt-0.5 text-[11px] text-muted-foreground">{sub}</div>
     </div>
   );
 }

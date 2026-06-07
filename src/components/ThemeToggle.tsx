@@ -8,18 +8,20 @@ export function applyStoredTheme() {
   if (typeof document === "undefined") return;
   try {
     const t = localStorage.getItem(KEY);
-    if (t === "dark") document.documentElement.classList.add("dark");
-    else document.documentElement.classList.remove("dark");
+    // Dark is the default; only an explicit "light" preference opts out.
+    if (t === "light") document.documentElement.classList.remove("dark");
+    else document.documentElement.classList.add("dark");
   } catch {}
 }
 
 export function ThemeToggle() {
-  const [dark, setDark] = useState(false);
+  const [dark, setDark] = useState(true);
 
   useEffect(() => {
     try {
       const t = localStorage.getItem(KEY);
-      const isDark = t === "dark";
+      // Dark is the default; only an explicit "light" preference opts out.
+      const isDark = t !== "light";
       setDark(isDark);
       document.documentElement.classList.toggle("dark", isDark);
     } catch {}
