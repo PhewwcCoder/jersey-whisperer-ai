@@ -212,6 +212,18 @@ function ForecastPage() {
   // as a badge tooltip. e.g. "gemini_key_missing", "gemini_http_429", "fetch_failed".
   const [classifyReason, setClassifyReason] = useState<string | null>(null);
 
+  // Stable content key for the candidate query set. The effect below depends on THIS
+  // (not the stockCandidates array reference), so it only re-fires when the actual list
+  // of queries changes — re-renders that produce the same queries never re-hit the API.
+  const stockCandidatesKey = useMemo(
+    () =>
+      stockCandidates
+        .map((c) => c.query.trim().toLowerCase())
+        .sort()
+        .join("|"),
+    [stockCandidates],
+  );
+
   useEffect(() => {
     let cancelled = false;
     const queries = stockCandidates.map((c) => c.query);
@@ -253,7 +265,8 @@ function ForecastPage() {
     return () => {
       cancelled = true;
     };
-  }, [stockCandidates]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stockCandidatesKey]);
 
   // Box 3 picks: Gemini-verified team jerseys when available, else the deterministic
   // isJerseyRelevantQuery() filter over the SAME candidates. Ranked by trend score.
@@ -860,7 +873,7 @@ function ForecastPage() {
                       {`Live: ${newsProvenance.apiFootball} from API-Football, ${newsProvenance.news} from news, ${newsProvenance.demo} demo`}
                       {newsProvenance.news > 0 && (
                         <span className="ml-1">
-                          · news via Google AI Mode · DeepSeek (deepseek-v4-flash) primary, Gemini fallback
+                          · news via Google AI Mode · DeepSeek (deepseek-chat) primary, Gemini fallback
                         </span>
                       )}
                     </>
@@ -1282,6 +1295,10 @@ function fallbackReasonLabel(reason: string | null): string {
   if (reason === "demo_cache_empty")
     return "Demo mode — no seeded classifications found; run scripts/seed-demo-cache.ts";
   if (reason === "demo_mode") return "Demo mode — serving pre-seeded cached data";
+  if (reason === "deepseek_key_missing") return "DeepSeek key missing — add DEEPSEEK_API_KEY to enable AI verification";
+  if (reason?.startsWith("deepseek_http_"))
+    return `DeepSeek returned ${reason.replace("deepseek_http_", "HTTP ")} — using rule filter`;
+  if (reason === "deepseek_parse_failed") return "DeepSeek response unparseable — using rule filter";
   if (reason === "openrouter_key_missing") return "OpenRouter key missing — add OPENROUTER_API_KEY to enable AI verification";
   if (reason === "gemini_key_missing") return "Gemini key missing — add GEMINI_API_KEY to enable AI verification";
   if (reason === "fetch_failed") return "Classifier request failed — using deterministic rule filter";
@@ -1321,7 +1338,7 @@ function StockPicksList({
           title={
             usingRuleFallback
               ? fallbackReasonLabel(fallbackReason)
-              : "Picks verified by AI (OpenRouter → Gemini fallback)"
+              : "Picks verified by AI (DeepSeek → Gemini fallback)"
           }
         >
           {usingRuleFallback ? "rule filter" : "AI-verified"}

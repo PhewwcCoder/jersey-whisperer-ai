@@ -1,9 +1,9 @@
 // api/classify-jerseys.ts — classify Live-Market-Signals candidate queries into
 // stockable football jerseys, for the "AI Stock Picks" box (Box 3) on the forecast page.
-// Server-side only. Primary: OpenRouter (model from OPENROUTER_MODEL env, default
-// openai/gpt-oss-120b:free — if that model returns 404/400 set OPENROUTER_MODEL to a
-// current free model, e.g. "mistralai/mistral-7b-instruct:free"). Fallback: Gemini
-// gemini-2.5-flash. Final fallback: deterministic rule filter in the client.
+// Server-side only. Primary: DeepSeek (DEEPSEEK_API_KEY, model from DEEPSEEK_MODEL env,
+// default deepseek-chat). Then OpenRouter if configured (OPENROUTER_MODEL, default
+// openai/gpt-oss-120b:free). Fallback: Gemini gemini-2.5-flash. Final fallback:
+// deterministic rule filter in the client.
 //
 // Caching is two-tier: a warm in-memory Map (L1, fast within one running instance)
 // backed by a durable Supabase table `jersey_classifications` (L2, survives restarts).
@@ -25,6 +25,8 @@ export const config = {
   maxDuration: 30,
 };
 
+const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
+const DEEPSEEK_MODEL_DEFAULT = "deepseek-chat";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODEL_DEFAULT = "openai/gpt-oss-120b:free";
 const GEMINI_URL =
@@ -182,6 +184,12 @@ async function upsertClassifications(
   }
 }
 
+function deepseekFallbackReason(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  const http = /HTTP (\d{3})/.exec(msg);
+  return http ? `deepseek_http_${http[1]}` : "deepseek_parse_failed";
+}
+
 function openRouterFallbackReason(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   const http = /HTTP (\d{3})/.exec(msg);
@@ -288,6 +296,38 @@ function parseClassifications(content: string): JerseyClassification[] {
     });
   }
   return out;
+}
+
+// PRIMARY classifier — DeepSeek (OpenAI-compatible chat/completions, model from
+// DEEPSEEK_MODEL env, default deepseek-chat). response_format json_object forces valid
+// JSON. Throws on error/empty so the caller falls back to Gemini.
+async function classifyWithDeepSeek(
+  queries: string[],
+  deepseekKey: string,
+): Promise<JerseyClassification[]> {
+  const model = process.env.DEEPSEEK_MODEL?.trim() || DEEPSEEK_MODEL_DEFAULT;
+  const res = await postWithRetry("DeepSeek", DEEPSEEK_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${deepseekKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: "You output only valid JSON, no prose, no markdown fences." },
+        { role: "user", content: buildPrompt(queries) },
+      ],
+      temperature: 0,
+      max_tokens: 4096,
+      response_format: { type: "json_object" },
+    }),
+  });
+  const payload = (await res.json()) as ChatUpstream;
+  if (payload.error) throw new Error(`DeepSeek error: ${payload.error.message ?? "unknown"}`);
+  const content = (payload.choices?.[0]?.message?.content ?? "").trim();
+  if (!content) throw new Error("DeepSeek empty content");
+  return parseClassifications(content);
 }
 
 async function classifyWithOpenRouter(
@@ -427,10 +467,26 @@ export async function classifyJerseys(
 
   if (!toClassify.length) return { ok: true, source: "cache", classifications: result };
 
+  const deepseekKey = process.env.DEEPSEEK_API_KEY?.trim();
   const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
   const geminiKey = process.env.GEMINI_API_KEY?.trim();
 
-  // L3 — LLM. OpenRouter primary → Gemini fallback. Persist fresh verdicts to L2.
+  // L3 — LLM. DeepSeek primary → (OpenRouter if configured) → Gemini fallback.
+  // Persist fresh verdicts to L2.
+  if (deepseekKey) {
+    try {
+      const fresh = await classifyWithDeepSeek(toClassify, deepseekKey);
+      const resolved = resolveAndCache(toClassify, fresh, result);
+      if (sb) await upsertClassifications(sb, resolved, day, opts?.scoreByQuery);
+      const model = process.env.DEEPSEEK_MODEL?.trim() || DEEPSEEK_MODEL_DEFAULT;
+      console.log(`[classify-jerseys] classified ${toClassify.length} via DeepSeek (${model})`);
+      return { ok: true, source: "live", classifications: result };
+    } catch (err) {
+      const reason = deepseekFallbackReason(err);
+      console.warn(`[classify-jerseys] DeepSeek failed · reason=${reason} → next provider`);
+    }
+  }
+
   if (openRouterKey) {
     try {
       const fresh = await classifyWithOpenRouter(toClassify, openRouterKey);
@@ -464,8 +520,8 @@ export async function classifyJerseys(
     }
   }
 
-  // No keys at all.
-  const reason = "openrouter_key_missing";
+  // No keys at all (DeepSeek is the primary provider).
+  const reason = "deepseek_key_missing";
   console.warn(`[classify-jerseys] no AI keys configured · reason=${reason} → rule filter`);
   return { ok: false, reason, classifications: null };
 }
@@ -492,7 +548,7 @@ export const handler = {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const http = /HTTP (\d{3})/.exec(msg);
-      const reason = http ? `openrouter_http_${http[1]}` : "handler_error";
+      const reason = http ? `deepseek_http_${http[1]}` : "handler_error";
       console.error("[classify-jerseys] handler error · reason=", reason);
       return jsonResponse({ ok: false, reason, classifications: null }, 200);
     }

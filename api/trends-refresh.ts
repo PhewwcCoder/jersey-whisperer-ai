@@ -92,7 +92,12 @@ async function fetchScoreForKeyword(
 
   const response = await fetch(`${SERPAPI_BASE}?${params.toString()}`);
   if (!response.ok) {
-    console.warn(`[trends-refresh] SerpApi HTTP ${response.status} for "${keyword}"`);
+    // Surface SerpApi's own error text (e.g. "Invalid API key" vs "ran out of searches")
+    // so a 401 is diagnosable. Body is the error message only — never contains the key.
+    const body = await response.text().catch(() => "");
+    console.warn(
+      `[trends-refresh] SerpApi HTTP ${response.status} for "${keyword}": ${body.slice(0, 200)}`,
+    );
     return null;
   }
 
@@ -171,7 +176,10 @@ async function fetchRelatedQueries(
 
   const response = await fetch(url);
   if (!response.ok) {
-    console.warn(`[trends-refresh] RELATED_QUERIES HTTP ${response.status} date="${date}"`);
+    const body = await response.text().catch(() => "");
+    console.warn(
+      `[trends-refresh] RELATED_QUERIES HTTP ${response.status} date="${date}": ${body.slice(0, 200)}`,
+    );
     return { top: [], rising: [] };
   }
 
@@ -597,6 +605,14 @@ export default {
     }
 
     const serpApiKey = process.env.SERPAPI_KEY;
+    // Diagnostic: presence + length + a SAFE fingerprint (first4…last4 only, never the
+    // full value). Compare the fingerprint to your known-good key (0a07…2088): if it
+    // differs, `vercel dev` is overriding .env.local with a stale cloud env var.
+    {
+      const k = process.env.SERPAPI_KEY || "";
+      const fp = k.length >= 8 ? `${k.slice(0, 4)}…${k.slice(-4)}` : "(too short)";
+      console.log("[serpapi] key present:", !!k, "length:", k.length, "fingerprint:", fp);
+    }
     if (!serpApiKey) {
       // Not a hard error — the app falls back to cached hardcoded snapshots.
       return jsonResponse({

@@ -1,12 +1,13 @@
-// api/football-news-refresh.ts — Google AI Mode football news → OpenRouter/Gemini parse → news_events
-// Server-side only. Uses process.env.SERPAPI_KEY (news) + process.env.OPENROUTER_API_KEY
-// (primary parser, model from OPENROUTER_MODEL env, default openai/gpt-oss-120b:free)
-// with process.env.GEMINI_API_KEY as fallback. Fills the trophy/results gap that
-// API-Football's free tier blocks. SerpApi's google_ai_mode engine returns a written
-// summary with inline citations; the parser ONLY STRUCTURES that text into events
-// (never sources/invents them), and a citation gate drops any event not traceable to a
-// real source link. OpenRouter is primary because response_format:json_object forces
-// valid JSON; if OpenRouter errors or returns unparseable output we fall back to Gemini.
+// api/football-news-refresh.ts — Google AI Mode football news → DeepSeek/Gemini parse → news_events
+// Server-side only. Uses process.env.SERPAPI_KEY (news) + process.env.DEEPSEEK_API_KEY
+// (primary parser, model from DEEPSEEK_MODEL env, default deepseek-chat), then
+// process.env.OPENROUTER_API_KEY if configured, with process.env.GEMINI_API_KEY as the
+// final fallback. Fills the trophy/results gap that API-Football's free tier blocks.
+// SerpApi's google_ai_mode engine returns a written summary with inline citations; the
+// parser ONLY STRUCTURES that text into events (never sources/invents them), and a
+// citation gate drops any event not traceable to a real source link. DeepSeek is primary
+// because response_format:json_object forces valid JSON; on error/unparseable output we
+// fall back through OpenRouter to Gemini.
 // Everything fails safe: any error writes nothing, keeps existing rows, never crashes.
 
 import {
@@ -28,6 +29,8 @@ const GEMINI_URL =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODEL_DEFAULT = "openai/gpt-oss-120b:free";
+const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
+const DEEPSEEK_MODEL_DEFAULT = "deepseek-chat";
 
 // THREE retrieval queries — each asks google_ai_mode to REPORT factual events (it
 // returns a written summary with citations). The "name the jersey to stock" guidance
@@ -200,7 +203,11 @@ async function fetchGoogleAiModeNews(serpApiKey: string, query: string): Promise
   );
 
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`SerpApi google_ai_mode HTTP ${res.status}`);
+  if (!res.ok) {
+    // Include SerpApi's error body so a 401 says WHY (invalid key vs out of searches).
+    const body = await res.text().catch(() => "");
+    throw new Error(`SerpApi google_ai_mode HTTP ${res.status}: ${body.slice(0, 200)}`);
+  }
   const data = (await res.json()) as Record<string, unknown>;
   if (data.error) throw new Error(`SerpApi google_ai_mode error: ${String(data.error)}`);
   return extractNewsText(data);
@@ -375,7 +382,44 @@ function openRouterFallbackReason(err: unknown): string {
   return http ? `openrouter_http_${http[1]}` : "openrouter_parse_failed";
 }
 
-// PRIMARY parser — OpenRouter (model from OPENROUTER_MODEL env, OpenAI-compatible).
+function deepseekFallbackReason(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  const http = /HTTP (\d{3})/.exec(msg);
+  return http ? `deepseek_http_${http[1]}` : "deepseek_parse_failed";
+}
+
+// PRIMARY parser — DeepSeek (model from DEEPSEEK_MODEL env, OpenAI-compatible
+// chat/completions). response_format json_object forces structurally-valid JSON. Strict
+// parse so any unparseable/empty output THROWS → caller falls back to the next provider.
+async function parseEventsWithDeepSeek(
+  newsText: string,
+  deepseekKey: string,
+): Promise<ParsedEvent[]> {
+  const model = process.env.DEEPSEEK_MODEL?.trim() || DEEPSEEK_MODEL_DEFAULT;
+  const res = await postWithRetry("DeepSeek", DEEPSEEK_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${deepseekKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: "You output only valid JSON, no prose, no markdown fences." },
+        { role: "user", content: buildGeminiPrompt(newsText) },
+      ],
+      temperature: 0,
+      max_tokens: 4096,
+      response_format: { type: "json_object" },
+    }),
+  });
+  const payload = (await res.json()) as ChatUpstream;
+  if (payload.error) throw new Error(`DeepSeek error: ${payload.error.message ?? "unknown"}`);
+  const content = (payload.choices?.[0]?.message?.content ?? "").trim();
+  return safeParseEvents(content, { strict: true });
+}
+
+// SECONDARY parser — OpenRouter (model from OPENROUTER_MODEL env, OpenAI-compatible).
 // response_format: json_object forces structurally-valid JSON. Strict parse so any
 // unparseable/empty output THROWS → caller falls back to Gemini.
 async function parseEventsWithOpenRouter(
@@ -640,16 +684,27 @@ export async function refreshFootballNews(opts?: {
   }
 
   const serpApiKey = process.env.SERPAPI_KEY;
+  // Diagnostic: presence + length + a SAFE fingerprint (first4…last4 only, never the
+  // full value). Compare the fingerprint to your known-good key (0a07…2088): if it
+  // differs, `vercel dev` is overriding .env.local with a stale cloud env var.
+  {
+    const k = process.env.SERPAPI_KEY || "";
+    const fp = k.length >= 8 ? `${k.slice(0, 4)}…${k.slice(-4)}` : "(too short)";
+    console.log("[serpapi] key present:", !!k, "length:", k.length, "fingerprint:", fp);
+  }
+  const deepseekKey = process.env.DEEPSEEK_API_KEY?.trim();
   const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
   const geminiKey = process.env.GEMINI_API_KEY?.trim();
   if (!serpApiKey) {
     console.warn("[football-news] SERPAPI_KEY not configured — skipping");
     return { written: 0 };
   }
-  // Need at least one parser. OpenRouter is primary; Gemini is the fallback.
-  // If neither is configured there's nothing to structure the news with, skip.
-  if (!openRouterKey && !geminiKey) {
-    console.warn("[football-news] no parser key (OPENROUTER_API_KEY / GEMINI_API_KEY) — skipping");
+  // Need at least one parser. DeepSeek is primary; Gemini is the fallback.
+  // If none is configured there's nothing to structure the news with, skip.
+  if (!deepseekKey && !openRouterKey && !geminiKey) {
+    console.warn(
+      "[football-news] no parser key (DEEPSEEK_API_KEY / OPENROUTER_API_KEY / GEMINI_API_KEY) — skipping",
+    );
     return { written: 0 };
   }
 
@@ -705,30 +760,46 @@ export async function refreshFootballNews(opts?: {
     return { written: 0 };
   }
 
-  // Step 2 — SINGLE parse. OpenRouter is primary (forces valid JSON via json_object);
-  // on any error we fall back to Gemini. If neither yields, write nothing.
-  let events: ParsedEvent[];
-  try {
-    if (openRouterKey) {
-      try {
-        events = await parseEventsWithOpenRouter(news.text, openRouterKey);
-        const model = process.env.OPENROUTER_MODEL?.trim() || OPENROUTER_MODEL_DEFAULT;
-        console.log(`[football-news] parsed with OpenRouter (${model})`);
-      } catch (orErr) {
-        const reason = openRouterFallbackReason(orErr);
-        if (!geminiKey) throw orErr; // no fallback available
-        console.warn(`[football-news] OpenRouter fallback → Gemini · reason=${reason}`);
-        events = await parseEventsWithGemini(news.text, geminiKey);
-        console.log("[football-news] parsed with Gemini (fallback)");
-      }
-    } else {
-      // openRouterKey absent — guard above guarantees geminiKey is present here.
-      console.warn("[football-news] OpenRouter fallback → Gemini · reason=openrouter_key_missing");
-      events = await parseEventsWithGemini(news.text, geminiKey as string);
-      console.log("[football-news] parsed with Gemini (fallback)");
+  // Step 2 — SINGLE parse. DeepSeek is primary (forces valid JSON via json_object);
+  // then OpenRouter if configured; Gemini is the final fallback. Each provider is tried
+  // in turn and the first success wins. If all fail/are absent, write nothing.
+  let events: ParsedEvent[] | null = null;
+
+  if (!events && deepseekKey) {
+    try {
+      events = await parseEventsWithDeepSeek(news.text, deepseekKey);
+      const model = process.env.DEEPSEEK_MODEL?.trim() || DEEPSEEK_MODEL_DEFAULT;
+      console.log(`[football-news] parsed with DeepSeek (${model})`);
+    } catch (dsErr) {
+      console.warn(
+        `[football-news] DeepSeek failed → next provider · reason=${deepseekFallbackReason(dsErr)}`,
+      );
     }
-  } catch (err) {
-    console.error("[football-news] parse failed — writing nothing:", err);
+  }
+
+  if (!events && openRouterKey) {
+    try {
+      events = await parseEventsWithOpenRouter(news.text, openRouterKey);
+      const model = process.env.OPENROUTER_MODEL?.trim() || OPENROUTER_MODEL_DEFAULT;
+      console.log(`[football-news] parsed with OpenRouter (${model})`);
+    } catch (orErr) {
+      console.warn(
+        `[football-news] OpenRouter failed → next provider · reason=${openRouterFallbackReason(orErr)}`,
+      );
+    }
+  }
+
+  if (!events && geminiKey) {
+    try {
+      events = await parseEventsWithGemini(news.text, geminiKey);
+      console.log("[football-news] parsed with Gemini (fallback)");
+    } catch (gErr) {
+      console.warn("[football-news] Gemini fallback failed:", gErr);
+    }
+  }
+
+  if (!events) {
+    console.error("[football-news] all parsers failed/absent — writing nothing");
     return { written: 0 };
   }
   const parsedCount = events.length;
