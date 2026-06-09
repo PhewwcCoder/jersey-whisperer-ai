@@ -730,16 +730,10 @@ function ForecastPage() {
                   <Radio className="h-4 w-4" />
                 </div>
                 <span className="font-semibold text-foreground">Live Market Signals</span>
-                <StatusIndicator status={geoStatus} fresh={dataFresh} fetchedAt={liveFetchedAt} />
               </div>
               <div className="mt-1 pl-9 text-xs text-muted-foreground">{provenanceText}</div>
             </div>
             <div className="flex shrink-0 flex-wrap items-center gap-2">
-              {geoStatus !== "live" && (
-                <span className="inline-flex items-center rounded-full border border-border bg-muted/60 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Cached
-                </span>
-              )}
               <Select value={geo} onValueChange={setGeo} disabled={refreshing}>
                 <SelectTrigger className="h-9 w-[170px]" aria-label="Select market">
                   <SelectValue />
