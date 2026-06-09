@@ -56,10 +56,6 @@ export function AppSidebar() {
           );
         })}
       </nav>
-      <div className="p-4 text-[11px] text-sidebar-foreground/60 border-t border-sidebar-border">
-        <div className="font-semibold text-sidebar-foreground/80 mb-1">Infinity AI BuildFest 2026</div>
-        Online Commerce track · MVP demo
-      </div>
     </aside>
   );
 }
