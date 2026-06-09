@@ -1,18 +1,20 @@
 // api/botpress-inquiry.ts — live jersey-inquiry capture for the Botpress chatbot.
 //
 // Add ONE "Execute Code" card in your Botpress flow, right after the user message is
-// received, that POSTs the incoming message here. This endpoint asks DeepSeek which
-// jersey the message is about and UPSERTs a row into Supabase `jersey_inquiry_events`
-// (idempotent on message_id). The `jersey_inquiry_counts` view then keeps growing on
-// its own — same data the backfill (scripts/scrape-botpress.ts) writes.
+// received, that POSTs the incoming message here. This endpoint resolves which jersey
+// the message is about (DeepSeek when DEEPSEEK_API_KEY is set, else/also a deterministic
+// keyword fallback for the common teams) and UPSERTs a row into Supabase
+// `jersey_inquiry_events` (idempotent on message_id). The `jersey_inquiry_counts` view
+// then keeps growing on its own — same data the backfill (scripts/scrape-botpress.ts) writes.
 //
 // Expected POST body (JSON):
 //   { messageId, text, conversationId?, channel?, askedAt? }
 // Optional security: set BOTPRESS_WEBHOOK_SECRET in env and send it as the
 // `x-webhook-secret` header from Botpress; requests without a matching secret are 401.
 //
-// Env: DEEPSEEK_API_KEY, SUPABASE_URL (or VITE_SUPABASE_URL),
-//      SUPABASE_SERVICE_ROLE_KEY (or VITE_SUPABASE_ANON_KEY), BOTPRESS_WEBHOOK_SECRET?
+// Env: SUPABASE_URL (or VITE_SUPABASE_URL) + SUPABASE_SERVICE_ROLE_KEY (or
+//      VITE_SUPABASE_ANON_KEY) are REQUIRED. DEEPSEEK_API_KEY and BOTPRESS_WEBHOOK_SECRET
+//      are optional. DEEPSEEK_MODEL overrides the default model (deepseek-chat).
 
 export const config = {
   runtime: "nodejs",
@@ -20,7 +22,9 @@ export const config = {
 };
 
 const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
-const DEEPSEEK_MODEL = "deepseek-v4-flash";
+// Real DeepSeek model id (overridable via DEEPSEEK_MODEL env). "deepseek-v4-flash" was
+// not a real model, so every extract call 400'd and the row was stored with team=null.
+const DEEPSEEK_MODEL_DEFAULT = "deepseek-chat";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -87,7 +91,7 @@ async function extractOne(text: string, deepSeekKey: string): Promise<Extracted>
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${deepSeekKey}` },
     body: JSON.stringify({
-      model: DEEPSEEK_MODEL,
+      model: process.env.DEEPSEEK_MODEL?.trim() || DEEPSEEK_MODEL_DEFAULT,
       messages: [
         { role: "system", content: "You output only valid JSON, no prose, no markdown fences." },
         { role: "user", content: buildExtractPrompt(text) },
@@ -110,8 +114,79 @@ async function extractOne(text: string, deepSeekKey: string): Promise<Extracted>
   };
 }
 
+// ── Deterministic keyword fallback ────────────────────────────────────────────
+// Used when DeepSeek is unavailable (no key / HTTP error) OR returns no team. Covers
+// the clubs/countries sellers ask about most. Matching is on lowercased, punctuation-
+// stripped text, so Banglish suffixes still hit (e.g. "argentinar" contains "argentina",
+// "madrider" contains "madrid"). First match wins; multi-word aliases are listed first.
+const TEAM_ALIASES: Array<{ team: string; aliases: string[] }> = [
+  { team: "Real Madrid", aliases: ["real madrid", "madrid", "rma"] },
+  {
+    team: "Manchester United",
+    aliases: ["manchester united", "man united", "man utd", "man u", "manutd"],
+  },
+  { team: "Manchester City", aliases: ["manchester city", "man city", "mancity"] },
+  { team: "Inter Miami", aliases: ["inter miami", "miami"] },
+  { team: "Barcelona", aliases: ["barcelona", "barca", "barça", "fcb"] },
+  { team: "Liverpool", aliases: ["liverpool", "lfc"] },
+  { team: "Arsenal", aliases: ["arsenal", "gunners"] },
+  { team: "Chelsea", aliases: ["chelsea", "cfc"] },
+  { team: "PSG", aliases: ["psg", "paris saint-germain", "paris saint germain", "paris sg"] },
+  { team: "Argentina", aliases: ["argentina", "albiceleste"] },
+  { team: "Portugal", aliases: ["portugal"] },
+  { team: "Brazil", aliases: ["brazil", "brasil"] },
+  { team: "Germany", aliases: ["germany", "deutschland"] },
+];
+
+// Player → team inference (mirrors the DeepSeek prompt's Messi→Argentina etc.).
+const PLAYER_TEAM: Array<{ player: string; team: string; aliases: string[] }> = [
+  { player: "Messi", team: "Argentina", aliases: ["messi"] },
+  { player: "Ronaldo", team: "Portugal", aliases: ["ronaldo", "cr7"] },
+  { player: "Neymar", team: "Brazil", aliases: ["neymar"] },
+];
+
+function detectJerseyType(t: string): string | null {
+  if (/\bhome\b/.test(t)) return "home";
+  if (/\baway\b/.test(t)) return "away";
+  if (/\bthird\b|\b3rd\b/.test(t)) return "third";
+  if (/\bretro\b/.test(t)) return "retro";
+  return null;
+}
+
+function detectSeason(t: string): string | null {
+  const year = /\b(20\d{2})\b/.exec(t);
+  return year ? year[1] : null;
+}
+
+function keywordExtract(rawText: string): Extracted {
+  const t = rawText
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  let team: string | null = null;
+  let player: string | null = null;
+
+  for (const entry of TEAM_ALIASES) {
+    if (entry.aliases.some((a) => t.includes(a))) {
+      team = entry.team;
+      break;
+    }
+  }
+  for (const entry of PLAYER_TEAM) {
+    if (entry.aliases.some((a) => t.includes(a))) {
+      player = entry.player;
+      if (!team) team = entry.team;
+      break;
+    }
+  }
+  return { team, player, jersey_type: detectJerseyType(t), season: detectSeason(t) };
+}
+
 function supabaseEnv(): { url: string; key: string } | null {
-  const url = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL)?.trim().replace(/\/$/, "");
+  const url = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL)
+    ?.trim()
+    .replace(/\/$/, "");
   const key = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY)?.trim();
   if (!url || !key) return null;
   return { url, key };
@@ -131,7 +206,9 @@ async function lastTeamForConversation(
       `${sb.url}/rest/v1/jersey_inquiry_events` +
       `?select=team&conversation_id=eq.${encodeURIComponent(conversationId)}` +
       `&team=not.is.null&order=asked_at.desc&limit=1`;
-    const res = await fetch(url, { headers: { apikey: sb.key, Authorization: `Bearer ${sb.key}` } });
+    const res = await fetch(url, {
+      headers: { apikey: sb.key, Authorization: `Bearer ${sb.key}` },
+    });
     if (!res.ok) return null;
     const rows = (await res.json()) as Array<{ team?: string }>;
     return rows[0]?.team ?? null;
@@ -185,34 +262,70 @@ export default {
       return jsonResponse({ ok: false, error: "messageId and text are required" }, 400);
     }
 
-    const deepSeekKey = process.env.DEEPSEEK_API_KEY?.trim();
+    // Supabase is the only HARD requirement. DeepSeek is optional — without it (or if it
+    // errors) the deterministic keyword extractor still resolves common teams.
     const sb = supabaseEnv();
-    if (!deepSeekKey || !sb) {
-      console.error("[botpress-inquiry] missing DEEPSEEK_API_KEY or Supabase env");
-      return jsonResponse({ ok: false, error: "server not configured" }, 500);
+    if (!sb) {
+      console.error(
+        "[botpress-inquiry] missing_supabase_env — set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY",
+      );
+      return jsonResponse({ ok: false, error: "missing_supabase_env" }, 500);
     }
-
-    let extracted: Extracted = { team: null, player: null, jersey_type: null, season: null };
-    try {
-      extracted = await extractOne(text, deepSeekKey);
-    } catch (err) {
-      // Still record the message (team=null) so it is not silently lost.
-      console.warn("[botpress-inquiry] extraction failed, recording raw:", (err as Error).message);
-    }
-
+    const deepSeekKey = process.env.DEEPSEEK_API_KEY?.trim();
     const conversationId = cleanField(body.conversationId);
-    // Context fallback: this message reads like a jersey follow-up (it specifies a kit
-    // or season) but named no team — inherit the team from earlier in the conversation.
+    const channel = cleanField(body.channel) ?? "webhook";
+
+    console.log(
+      `[botpress-inquiry] method=${request.method} bodyKeys=[${Object.keys(body).join(",")}]` +
+        ` messageId=${messageId} channel=${channel} deepseek=${Boolean(deepSeekKey)}`,
+    );
+    console.log(`[botpress-inquiry] text="${text.slice(0, 160)}"`);
+
+    // 1) DeepSeek (when configured). 2) keyword fallback fills any gaps, or is the whole
+    // result when DeepSeek is absent/failed. Extraction never blocks the write.
+    let extracted: Extracted = { team: null, player: null, jersey_type: null, season: null };
+    let via = "keyword";
+    if (deepSeekKey) {
+      try {
+        extracted = await extractOne(text, deepSeekKey);
+        via = "deepseek";
+      } catch (err) {
+        console.warn(
+          "[botpress-inquiry] DeepSeek extraction failed, using keyword fallback:",
+          (err as Error).message,
+        );
+      }
+    }
+
+    const kw = keywordExtract(text);
+    if (!extracted.team && kw.team) {
+      extracted.team = kw.team;
+      via = via === "deepseek" ? "deepseek+keyword" : "keyword";
+    }
+    extracted.player ??= kw.player;
+    extracted.jersey_type ??= kw.jersey_type;
+    extracted.season ??= kw.season;
+
+    // Context fallback: a jersey follow-up that names a kit/season but no team inherits
+    // the team mentioned earlier in the same conversation.
     if (!extracted.team && (extracted.jersey_type || extracted.season)) {
       const inherited = await lastTeamForConversation(sb, conversationId);
-      if (inherited) extracted.team = inherited;
+      if (inherited) {
+        extracted.team = inherited;
+        via += "+context";
+      }
     }
+
+    console.log(
+      `[botpress-inquiry] extracted team=${extracted.team ?? "null"} player=${extracted.player ?? "null"}` +
+        ` type=${extracted.jersey_type ?? "null"} season=${extracted.season ?? "null"} via=${via}`,
+    );
 
     try {
       await upsertEvent(sb, {
         message_id: messageId,
         conversation_id: conversationId,
-        channel: cleanField(body.channel) ?? "webhook",
+        channel,
         raw_text: text,
         team: extracted.team,
         player: extracted.player,
@@ -222,10 +335,16 @@ export default {
         asked_at: cleanField(body.askedAt) ?? new Date().toISOString(),
       });
     } catch (err) {
-      console.error("[botpress-inquiry] DB write failed:", (err as Error).message);
-      return jsonResponse({ ok: false, error: "db_write_failed" }, 500);
+      const detail = (err as Error).message;
+      console.error("[botpress-inquiry] db_write_failed:", detail);
+      // `detail` is the Supabase status + body slice (no secrets) — e.g. relation
+      // "jersey_inquiry_events" does not exist → run supabase/jersey_inquiry.sql.
+      return jsonResponse({ ok: false, error: "db_write_failed", detail }, 500);
     }
 
-    return jsonResponse({ ok: true, team: extracted.team });
+    console.log(
+      `[botpress-inquiry] stored message_id=${messageId} team=${extracted.team ?? "null"}`,
+    );
+    return jsonResponse({ ok: true, stored: true, team: extracted.team, messageId });
   },
 };

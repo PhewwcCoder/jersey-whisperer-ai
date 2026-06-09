@@ -36,7 +36,9 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 function supabaseEnv(): SupabaseEnv | null {
-  const url = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL)?.trim().replace(/\/$/, "");
+  const url = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL)
+    ?.trim()
+    .replace(/\/$/, "");
   const key = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY)?.trim();
   if (!url || !key) return null;
   return { url, key };
@@ -115,8 +117,11 @@ export default {
       const counts = await fetchCounts(sb, limit);
       return jsonResponse({ ok: true, counts });
     } catch (err) {
-      console.error("[jersey-inquiries] read failed:", (err as Error).message);
-      return jsonResponse({ ok: false, error: "read_failed", counts: [] }, 500);
+      const detail = (err as Error).message;
+      console.error("[jersey-inquiries] read failed:", detail);
+      // `detail` carries the Supabase status + body slice (no secrets) so a missing
+      // table/view (run supabase/jersey_inquiry.sql) is obvious from the response.
+      return jsonResponse({ ok: false, error: "read_failed", detail, counts: [] }, 500);
     }
   },
 };

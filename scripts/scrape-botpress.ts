@@ -26,7 +26,8 @@ import { readFileSync } from "node:fs";
 
 const BOTPRESS_API = "https://api.botpress.cloud/v1/chat";
 const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
-const DEEPSEEK_MODEL = "deepseek-v4-flash";
+// Real DeepSeek model id (was "deepseek-v4-flash", which is not a real model and 400'd).
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL?.trim() || "deepseek-chat";
 const DRY_RUN = process.argv.includes("--dry");
 const CONVERSATION_LIMIT = numberFlag(["--limit", "--conversation-limit"]);
 const SINCE = dateFlag("--since");
