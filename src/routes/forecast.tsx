@@ -140,15 +140,14 @@ function ForecastPage() {
       .pop();
   }, [marketDiscovery.fetchedAt, trendSignals]);
 
+  // "Last refreshed" label from the most-recent cached timestamp (trend_signals /
+  // market_discovery). No timestamp yet → "Never refreshed". Presentational only.
   const provenanceText = useMemo(() => {
-    if (geoStatus === "live" && liveFetchedAt) {
-      return `Live · SerpApi · ${geoName(geo)} · refreshed ${timeAgo(liveFetchedAt)}`;
+    if (liveFetchedAt) {
+      return `Last refreshed: ${timeAgo(liveFetchedAt)}`;
     }
-    if (geoStatus === "demo") {
-      return "Demo snapshot (no live data yet)";
-    }
-    return `No data for ${geoName(geo)} yet — click "Refresh trends" to fetch`;
-  }, [geoStatus, liveFetchedAt, geo]);
+    return "Never refreshed";
+  }, [liveFetchedAt]);
 
   const dataFresh = geoStatus === "live" && isFresh(liveFetchedAt);
 
@@ -736,6 +735,11 @@ function ForecastPage() {
               <div className="mt-1 pl-9 text-xs text-muted-foreground">{provenanceText}</div>
             </div>
             <div className="flex shrink-0 flex-wrap items-center gap-2">
+              {geoStatus !== "live" && (
+                <span className="inline-flex items-center rounded-full border border-border bg-muted/60 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Cached
+                </span>
+              )}
               <Select value={geo} onValueChange={setGeo} disabled={refreshing}>
                 <SelectTrigger className="h-9 w-[170px]" aria-label="Select market">
                   <SelectValue />
@@ -878,7 +882,7 @@ function ForecastPage() {
                       )}
                     </>
                   ) : (
-                    "Demo data — refresh to pull live API-Football + news events"
+                    "No live events yet — refresh to pull live API-Football + news events"
                   )}
                 </div>
               )}
@@ -1460,9 +1464,9 @@ function StatusIndicator({
   }
   if (status === "demo") {
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-warning">
-        <span className="h-1.5 w-1.5 rounded-full bg-warning" aria-hidden />
-        Demo data
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/60 px-2.5 py-1 text-[11px] font-medium normal-case tracking-normal text-muted-foreground">
+        <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/50" aria-hidden />
+        Demo snapshot
       </span>
     );
   }
