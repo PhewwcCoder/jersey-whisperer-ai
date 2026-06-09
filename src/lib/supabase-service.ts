@@ -26,6 +26,17 @@ export interface SemanticSearchHit {
   metadata: Record<string, unknown>;
 }
 
+export interface JerseyInquiryCount {
+  jersey_key: string;
+  team: string;
+  player: string | null;
+  jersey_type: string | null;
+  season: string | null;
+  mentions: number;
+  distinct_customers: number;
+  last_asked_at: string | null;
+}
+
 type ProductRow = {
   id: string;
   team: string;
@@ -69,6 +80,12 @@ async function withSupabaseTimeout<T>(
 
 function safeNumber(value: unknown, fallback = 0) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function safeCount(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.round(value));
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : 0;
 }
 
 function average(values: number[]) {
@@ -115,6 +132,85 @@ function sanitizeProduct(candidate: Partial<Product> & { id?: string }): Product
           },
         ],
   };
+}
+
+function normalizeDemandText(value: string | null | undefined): string {
+  return (value ?? "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function countDemand(count: JerseyInquiryCount): number {
+  return safeCount(count.distinct_customers || count.mentions);
+}
+
+function seasonMatches(product: Product, season: string | null): boolean {
+  if (!season) return true;
+  const year = /\b(19|20)\d{2}\b/.exec(season)?.[0];
+  if (!year) return true;
+  return String(product.season_year) === year;
+}
+
+function playerMatches(product: Product, player: string | null): boolean {
+  if (!player) return true;
+  const playerNeedle = normalizeDemandText(player);
+  if (!playerNeedle) return true;
+  const productText = normalizeDemandText(
+    [product.player_name, product.font_name, product.product_name].filter(Boolean).join(" "),
+  );
+  return productText.includes(playerNeedle);
+}
+
+function jerseyTypeMatches(product: Product, jerseyType: string | null): boolean {
+  if (!jerseyType) return true;
+  return normalizeDemandText(product.kit_type) === normalizeDemandText(jerseyType);
+}
+
+function countMatchesProduct(product: Product, count: JerseyInquiryCount): boolean {
+  if (normalizeDemandText(product.team_country_club) !== normalizeDemandText(count.team)) {
+    return false;
+  }
+  return (
+    playerMatches(product, count.player) &&
+    jerseyTypeMatches(product, count.jersey_type) &&
+    seasonMatches(product, count.season)
+  );
+}
+
+function inquiryCountForProduct(product: Product, counts: JerseyInquiryCount[]): number {
+  return counts.reduce((sum, count) => {
+    if (!countMatchesProduct(product, count)) return sum;
+    return sum + countDemand(count);
+  }, 0);
+}
+
+export function applyJerseyInquiryCountsToProducts(
+  products: Product[],
+  counts: JerseyInquiryCount[],
+): Product[] {
+  if (!counts.length) return products;
+
+  let changed = false;
+  const next = products.map((product) => {
+    const botpressCount = inquiryCountForProduct(product, counts);
+    if (botpressCount <= 0) return product;
+
+    const existingCount = safeCount(product.query_count);
+    if (existingCount === botpressCount) return product;
+
+    changed = true;
+    return {
+      ...product,
+      query_count: botpressCount,
+    };
+  });
+
+  return changed ? next : products;
 }
 
 function readProductsFromBrowserStorage() {
@@ -332,6 +428,25 @@ export async function fetchProductsFromSupabase() {
     // product appears once. Keeps the first occurrence (newest by created_at).
     return dedupeProductsByIdentity((data as ProductRow[]).map((row) => parseProductRow(row)));
   }, []);
+}
+
+export async function fetchJerseyInquiryCounts(): Promise<JerseyInquiryCount[]> {
+  if (typeof window === "undefined") return [];
+
+  try {
+    const res = await fetch("/api/jersey-inquiries?limit=500", {
+      headers: { accept: "application/json" },
+    });
+    if (!res.ok) return [];
+    const payload = (await res.json()) as {
+      ok?: boolean;
+      counts?: JerseyInquiryCount[];
+    };
+    return payload.ok && Array.isArray(payload.counts) ? payload.counts : [];
+  } catch (error) {
+    console.warn("[Botpress inquiries] count read skipped", error);
+    return [];
+  }
 }
 
 export async function upsertProductToSupabase(product: Product) {

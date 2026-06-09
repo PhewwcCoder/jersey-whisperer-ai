@@ -146,8 +146,8 @@ function matchesFilter(
 function AdvisorPage() {
   const { products } = useStore();
   const [activeFilter, setActiveFilter] = useState<AdvisorFilter>("All");
-  const [reviewedIds, setReviewedIds] = useState<Record<string, true>>({});
-  const [expandedIds, setExpandedIds] = useState<Record<string, true>>({});
+  const [reviewedIds, setReviewedIds] = useState<Record<string, boolean>>({});
+  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
 
   const recommendations = useMemo<AdvisorRecommendation[]>(() => {
     const output: AdvisorRecommendation[] = [];

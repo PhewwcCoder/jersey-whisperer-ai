@@ -218,10 +218,11 @@ function QueryPage() {
         if (typeof data.reply !== "string" || !data.reply.trim()) {
           throw new Error("Gemini route returned no reply text");
         }
+        const aiReply = data.reply.trim();
 
         setTurns((current) =>
           updateTurn(current, turnId, {
-            botReply: data.reply.trim(),
+            botReply: aiReply,
             source: "Gemini AI",
             fallbackUsed: false,
             errorMessage: undefined,
@@ -229,7 +230,7 @@ function QueryPage() {
             isLoading: false,
           }),
         );
-        persistChatLog(query, data.reply.trim(), result.matched_product_id);
+        persistChatLog(query, aiReply, result.matched_product_id);
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : "Unknown Gemini request failure.";

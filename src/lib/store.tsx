@@ -1,7 +1,9 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { seedProducts } from "./seed-data";
 import {
+  applyJerseyInquiryCountsToProducts,
   deleteProductFromSupabase,
+  fetchJerseyInquiryCounts,
   fetchProductsFromSupabase,
   upsertProductToSupabase,
 } from "./supabase-service";
@@ -59,15 +61,26 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
 
     const load = async () => {
-      if (!isSupabaseConfigured) return;
+      let baseProducts = localProducts;
 
-      const remoteProducts = await fetchProductsFromSupabase();
-      if (cancelled) return;
+      if (isSupabaseConfigured) {
+        const remoteProducts = await fetchProductsFromSupabase();
+        if (cancelled) return;
 
-      if (remoteProducts.length > 0) {
-        const clean = sanitize(remoteProducts);
-        setProductsState(clean);
-        persistLocalProducts(clean);
+        if (remoteProducts.length > 0) {
+          baseProducts = sanitize(remoteProducts);
+          setProductsState(baseProducts);
+          persistLocalProducts(baseProducts);
+        }
+      }
+
+      const inquiryCounts = await fetchJerseyInquiryCounts();
+      if (cancelled || !inquiryCounts.length) return;
+
+      const withInquiries = applyJerseyInquiryCountsToProducts(baseProducts, inquiryCounts);
+      if (withInquiries !== baseProducts) {
+        setProductsState(withInquiries);
+        persistLocalProducts(withInquiries);
       }
     };
 

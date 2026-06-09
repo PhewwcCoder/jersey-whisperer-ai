@@ -57,7 +57,8 @@ export interface Variant {
 export interface CustomerEvent {
   type: "query" | "confirmed_sale";
   timestamp: number;
-  // Confirmed-order magnitude (units). Used by S_order; defaults to 1 when unknown.
+  // Event magnitude. For sales this is units; for query events this may be a
+  // distinct-customer count imported from Botpress. Defaults to 1 when unknown.
   quantity?: number;
 }
 

@@ -95,15 +95,17 @@ function getAverageMargin(variants: Variant[]) {
 const CONV_LAMBDA = 0.0495; // ln(2) / 14
 
 // Recency-decayed raw sum for a single bucket. `confirmed` selects which event type;
-// confirmed events use their quantity (>=1) as magnitude, queries use weight 1.
+// events use their quantity (>=1) as magnitude when supplied; this lets Botpress
+// distinct-customer counts participate in the same event-based scoring model.
 function rawForBucket(events: Product["events"], confirmed: boolean, now: number): number {
   let raw = 0;
   for (const event of events ?? []) {
     if (confirmed ? event.type !== "confirmed_sale" : event.type !== "query") continue;
     const ageDays = (now - event.timestamp) / 86400000;
-    const magnitude = confirmed
-      ? (Number.isFinite(event.quantity) && (event.quantity as number) > 0 ? (event.quantity as number) : 1)
-      : 1;
+    const magnitude =
+      Number.isFinite(event.quantity) && (event.quantity as number) > 0
+        ? (event.quantity as number)
+        : 1;
     raw += magnitude * Math.exp(-CONV_LAMBDA * ageDays);
   }
   return raw;
@@ -271,6 +273,30 @@ function estimateRecentSales(product: Product, recentInquiries: number, signals?
   );
 }
 
+function queryCount(product: Product): number {
+  return Number.isFinite(product.query_count) ? Math.max(0, product.query_count as number) : 0;
+}
+
+function productWithQueryCountEvent(product: Product, now = Date.now()): Product {
+  const recentInquiries = queryCount(product);
+  if (recentInquiries <= 0) return product;
+
+  const existingEvents = product.events ?? [];
+  if (existingEvents.some((event) => event.type === "query")) return product;
+
+  return {
+    ...product,
+    events: [
+      ...existingEvents,
+      {
+        type: "query",
+        timestamp: now,
+        quantity: recentInquiries,
+      },
+    ],
+  };
+}
+
 function getRecommendation(args: {
   score: number;
   stock: number;
@@ -414,11 +440,21 @@ export function forecastProduct(
 ): ForecastResult {
   const variants = safeVariants(product);
   const stock = sumStock(variants);
-  const recentInquiries = Number.isFinite(product.query_count)
-    ? (product.query_count as number)
-    : 0;
+  const recentInquiries = queryCount(product);
   const recentSales = estimateRecentSales(product, recentInquiries, signals);
-  const dss = calculateDemandSpikeScore(product, recentInquiries, recentSales, signals, allProducts, newsEvents);
+  const now = Date.now();
+  const scoringProduct = productWithQueryCountEvent(product, now);
+  const scoringProducts = (allProducts.length ? allProducts : [product]).map((entry) =>
+    productWithQueryCountEvent(entry, now),
+  );
+  const dss = calculateDemandSpikeScore(
+    scoringProduct,
+    recentInquiries,
+    recentSales,
+    signals,
+    scoringProducts,
+    newsEvents,
+  );
   const bestTrend = getBestTrendForProduct(product, signals);
   const averageMargin = getAverageMargin(variants);
   const trendScore = getTrendScoreForProduct(product, signals);

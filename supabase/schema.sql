@@ -286,3 +286,79 @@ insert into public.news_events (type, player, team, secondary_team, event_date, 
   ('retirement',  'Luka Modric',        'Real Madrid',    null,           now() - interval '14 days', 'mid',  0.3, 'demo_seed'),
   ('kit_release',  null,                'Barcelona',      null,           now() - interval '6 days',  'most', 0.4, 'demo_seed')
 on conflict (type, player, team, event_date) do nothing;
+-- ════════════════════════════════════════════════════════════════════════════
+-- Botpress jersey-inquiry tracking
+-- Backfilled by scripts/scrape-botpress.ts (history) and appended live by
+-- api/botpress-inquiry.ts (Botpress "Execute Code" webhook). One row per customer
+-- message that DeepSeek classifies as a jersey request. `message_id` is the Botpress
+-- message id and is UNIQUE, so re-running the backfill or replaying a webhook never
+-- double-counts the same message.
+-- ════════════════════════════════════════════════════════════════════════════
+create table if not exists public.jersey_inquiry_events (
+  id uuid primary key default gen_random_uuid(),
+  message_id text unique not null,        -- Botpress message id (idempotency key)
+  conversation_id text,
+  channel text,                           -- webchat | messenger | ...
+  raw_text text not null,                 -- the original (often Banglish) customer message
+  team text,                              -- canonical English team, e.g. "Argentina" (null = not a jersey request)
+  player text,                            -- player name if asked by name, else null
+  jersey_type text,                       -- home | away | third | retro | null
+  season text,                            -- e.g. "2026", "2022 WC", else null
+  source text default 'botpress',          -- backfill | webhook
+  asked_at timestamptz,                   -- Botpress message createdAt
+  created_at timestamptz default now()
+);
+
+create index if not exists jersey_inquiry_events_team_idx on public.jersey_inquiry_events (team);
+create index if not exists jersey_inquiry_events_asked_at_idx on public.jersey_inquiry_events (asked_at desc);
+
+drop view if exists public.jersey_inquiry_counts;
+drop view if exists public.jersey_inquiry_team_counts;
+
+-- Rollup the dashboard reads. A VIEW (not a counter table) so it is always consistent
+-- with the events and never races — both backfill and webhook only ever INSERT events.
+create or replace view public.jersey_inquiry_counts as
+  select
+    concat_ws(
+      '|',
+      team,
+      coalesce(nullif(player, ''), 'any_player'),
+      coalesce(nullif(jersey_type, ''), 'any_kit'),
+      coalesce(nullif(season, ''), 'any_season')
+    )                                      as jersey_key,
+    team,
+    nullif(player, '')                     as player,
+    nullif(jersey_type, '')                as jersey_type,
+    nullif(season, '')                     as season,
+    count(*)::int                          as mentions,
+    count(distinct coalesce(conversation_id, message_id))::int
+                                            as distinct_customers,
+    max(asked_at)                          as last_asked_at
+  from public.jersey_inquiry_events
+  where team is not null
+  group by
+    team,
+    nullif(player, ''),
+    nullif(jersey_type, ''),
+    nullif(season, '')
+  order by distinct_customers desc, mentions desc;
+
+create or replace view public.jersey_inquiry_team_counts as
+  select
+    team,
+    count(*)::int                          as mentions,
+    count(distinct coalesce(conversation_id, message_id))::int
+                                            as distinct_customers,
+    max(asked_at)                          as last_asked_at
+  from public.jersey_inquiry_events
+  where team is not null
+  group by team
+  order by distinct_customers desc, mentions desc;
+
+alter table public.jersey_inquiry_events enable row level security;
+drop policy if exists "hackathon_jersey_inquiry_events_all" on public.jersey_inquiry_events;
+create policy "hackathon_jersey_inquiry_events_all" on public.jersey_inquiry_events
+  for all to anon using (true) with check (true);
+
+comment on table public.jersey_inquiry_events is
+  'One row per customer jersey request scraped/streamed from Botpress. message_id UNIQUE = idempotent. Hackathon policy is permissive — replace with merchant RLS in production.';
