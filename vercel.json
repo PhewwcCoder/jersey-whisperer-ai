@@ -2,6 +2,12 @@
   "devCommand": "vite --port $PORT",
   "buildCommand": "vite build --configLoader runner",
   "outputDirectory": "dist/client",
+  "functions": {
+    "api/trends-refresh.ts": { "maxDuration": 60 },
+    "api/football-news-refresh.ts": { "maxDuration": 60 },
+    "api/news-refresh.ts": { "maxDuration": 60 },
+    "api/news-only-refresh.ts": { "maxDuration": 60 }
+  },
   "rewrites": [
     { "source": "/((?!api/|@|.*\\.).*)", "destination": "/index.html" }
   ]
