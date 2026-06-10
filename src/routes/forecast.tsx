@@ -146,7 +146,7 @@ function ForecastPage() {
     if (liveFetchedAt) {
       return `Last refreshed: ${timeAgo(liveFetchedAt)}`;
     }
-    return "Never refreshed";
+    return "";
   }, [liveFetchedAt]);
 
   const dataFresh = geoStatus === "live" && isFresh(liveFetchedAt);
@@ -564,7 +564,6 @@ function ForecastPage() {
             <h1 className="text-2xl font-bold tracking-tight text-foreground md:text-[28px]">
               Demand Forecast
             </h1>
-            <StatusIndicator status={geoStatus} fresh={dataFresh} fetchedAt={liveFetchedAt} />
           </div>
           <p className="mt-1.5 max-w-2xl text-sm text-muted-foreground">
             Real-time demand signals to decide what to restock, promote, or hold this week.

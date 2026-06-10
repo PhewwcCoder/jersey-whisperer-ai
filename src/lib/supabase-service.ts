@@ -50,7 +50,10 @@ type ProductRow = {
   created_at: string | null;
 };
 
-const SUPABASE_TIMEOUT_MS = 1800;
+// Max wait before a Supabase call falls back to demo/empty. 5s tolerates cold-start
+// latency on the live Vercel site (the first call also pays the dynamic supabase-js
+// import + BD→Supabase round-trip); 1.8s was tripping the mount fetches.
+const SUPABASE_TIMEOUT_MS = 5000;
 
 async function withSupabaseTimeout<T>(
   label: string,
@@ -553,17 +556,35 @@ export async function fetchMarketDiscoveryFromSupabase(geo = "BD"): Promise<Mark
 }
 
 export async function fetchNewsEventsFromSupabase(): Promise<import("./news-score").NewsEvent[]> {
-  return withSupabaseTimeout("fetch news events", async () => {
-    const supabase = await getSupabaseClient();
-    if (!supabase) return [];
-    const { data, error } = await supabase
-      .from("news_events")
-      .select("*")
-      .order("event_date", { ascending: false })
-      .limit(100);
-    if (error) throw error;
-    return (data ?? []) as import("./news-score").NewsEvent[];
-  }, []);
+  return withSupabaseTimeout(
+    "fetch news events",
+    async () => {
+      const supabase = await getSupabaseClient();
+      if (!supabase) return [];
+
+      // Sort by created_at so newly inserted rows always appear first, regardless of
+      // event_date (which can be null/backdated).
+      const queryOnce = async (): Promise<import("./news-score").NewsEvent[]> => {
+        const { data, error } = await supabase
+          .from("news_events")
+          .select("*")
+          .order("created_at", { ascending: false })
+          .limit(100);
+        if (error) throw error;
+        return (data ?? []) as import("./news-score").NewsEvent[];
+      };
+
+      // One retry: an empty first read on a cold connection retries once after 800ms.
+      let rows = await queryOnce();
+      if (rows.length === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        rows = await queryOnce();
+      }
+      return rows;
+    },
+    [],
+    8000, // news fetch gets a longer budget than the 5s default (cold start + retry)
+  );
 }
 
 export async function seedTrendSignalsToSupabase(signals: LocalTrendSignal[]) {

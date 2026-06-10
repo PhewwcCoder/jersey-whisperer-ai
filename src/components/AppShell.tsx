@@ -42,8 +42,8 @@ export function AppShell({ children }: { children: ReactNode }) {
           {children}
         </main>
         <footer className="border-t border-border px-4 md:px-8 py-4 text-xs text-muted-foreground">
-          <span className="font-semibold text-foreground">JerseyBecho AI</span> · Built for Infinity
-          AI BuildFest 2026 · Online Commerce track
+          <span className="font-semibold text-foreground">JerseyBecho AI</span> · Online Commerce
+          track
         </footer>
       </div>
     </div>
