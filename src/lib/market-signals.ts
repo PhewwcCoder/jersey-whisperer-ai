@@ -124,6 +124,13 @@ export const COMPETITOR_NAMES: string[] = [
   "jersey freak", "jersey champs",
 ];
 
+// (2b-ii) Clothing / fashion brands that print "jersey"-style apparel but are NOT
+// football team jerseys (purchase intent is fashion, not a stockable team kit). Drop
+// outright even when the query contains "jersey".
+export const CLOTHING_BRANDS: string[] = [
+  "fabrilife", "aarong", "le reve", "richman", "ecstasy", "easy fashion", "yellow clothing",
+];
+
 // (2c) Dhaka-area / locality tokens — combined with a standalone "bd" marker these flag
 // a competitor-shop / locality query (e.g. "jersey freak bd khilgaon"). Extend freely.
 export const DHAKA_AREAS: string[] = [
@@ -168,6 +175,7 @@ export function isJerseyRelevantQuery(query: string): boolean {
   // (2) Blocklist first — a junk/competitor/locality/intent hit drops the query outright.
   if (QUERY_JUNK_TERMS.some((term) => q.includes(term))) return false;
   if (COMPETITOR_NAMES.some((term) => q.includes(term))) return false;
+  if (CLOTHING_BRANDS.some((term) => q.includes(term))) return false;
   // shop/commerce + info intent drops the query even if it mentions "jersey".
   if (QUERY_INTENT_JUNK.some((term) => q.includes(term))) return false;
   // standalone "bd" marker + any Dhaka-area token ⇒ competitor-shop locality query.

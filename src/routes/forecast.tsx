@@ -188,6 +188,19 @@ function ForecastPage() {
     [marketDiscovery.related],
   );
 
+  // RISING display ordering (display-only — never touches `related`, scoring, or the API):
+  // catalog-matched queries first, then up to 3 "opportunity" (unmatched) queries, capped
+  // at 8 rows total. "matched" = the query maps to something we already stock.
+  const risingDisplay = useMemo(() => {
+    const annotated = relatedRising.map((r) => ({
+      ...r,
+      matched: queryMatchesInventory(r.query, inventoryText),
+    }));
+    const matched = annotated.filter((r) => r.matched);
+    const opportunity = annotated.filter((r) => !r.matched).slice(0, 3);
+    return [...matched, ...opportunity].slice(0, 8);
+  }, [relatedRising, inventoryText]);
+
   // Box 3 (AI Stock Picks) candidates: every raw top + rising query, deduped by text,
   // scored by the (20/80 recency-blended) trend score. Memoized so the classify effect
   // below only re-fires when the underlying queries actually change.
@@ -288,7 +301,21 @@ function ForecastPage() {
         .filter((c) => isJerseyRelevantQuery(c.query))
         .map((c) => ({ query: c.query, team: matchQueryToTeam(c.query) ?? null, score: c.score }));
     }
-    return picks.sort((a, b) => b.score - a.score);
+    // Dedupe near-duplicates by resolved team, keeping the higher-scored query (e.g.
+    // "argentina jersey" vs "argentina jersey 2026" → keep the stronger one). Picks with
+    // no resolved team are never collapsed together.
+    const sorted = picks.sort((a, b) => b.score - a.score);
+    const seenTeam = new Set<string>();
+    const deduped: typeof sorted = [];
+    for (const pick of sorted) {
+      const teamKey = pick.team ? pick.team.trim().toLowerCase() : null;
+      if (teamKey) {
+        if (seenTeam.has(teamKey)) continue;
+        seenTeam.add(teamKey);
+      }
+      deduped.push(pick);
+    }
+    return deduped;
   }, [jerseyClassifications, stockCandidates]);
 
   // Cache-only read for a geo. NEVER calls SerpApi — protects the 100-call/month quota.
@@ -777,7 +804,8 @@ function ForecastPage() {
               <RelatedQueryList
                 title="Rising"
                 icon={<ArrowUpRight className="h-3.5 w-3.5" />}
-                items={relatedRising}
+                items={risingDisplay}
+                markOpportunity
               />
               <StockPicksList
                 items={stockPicks}
@@ -1238,10 +1266,13 @@ function RelatedQueryList({
   title,
   icon,
   items,
+  markOpportunity = false,
 }: {
   title: string;
   icon: ReactNode;
-  items: { query: string; value: number; score: number; bucket: "top" | "rising" }[];
+  items: { query: string; value: number; score: number; bucket: "top" | "rising"; matched?: boolean }[];
+  // When true, unmatched rows (not in catalog) get a muted "opportunity" badge.
+  markOpportunity?: boolean;
 }) {
   return (
     <div className="rounded-xl border border-border bg-background/40 p-3">
@@ -1267,7 +1298,14 @@ function RelatedQueryList({
               aria-hidden
             />
             <div className="relative flex items-center justify-between gap-2">
-              <div className="min-w-0 truncate text-[13px] text-foreground/90">{item.query}</div>
+              <div className="min-w-0">
+                <div className="truncate text-[13px] text-foreground/90">{item.query}</div>
+                {markOpportunity && item.matched === false && (
+                  <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">
+                    opportunity
+                  </div>
+                )}
+              </div>
               <div className="shrink-0 font-mono text-xs font-medium tabular-nums text-foreground">
                 {Math.round(item.score * 100)}%
               </div>
