@@ -9,10 +9,10 @@ import nodeFetch from "node-fetch";
 const fetch = nodeFetch as unknown as typeof globalThis.fetch;
 
 // Reuse the shared alias matcher (hardcoded team/alias list) for query→team dedup.
-import { matchQueryToTeam } from "../src/lib/trend-signals";
+import { matchQueryToTeam } from "../src/lib/trend-signals.js";
 // Football-relevance filter for the related-queries DISPLAY boxes (drops cricket/
 // other-sport/noise queries). DISPLAY-DATA ONLY — never touches DSS/trend_signals.
-import { isFootballRelevant } from "../src/lib/football-filter";
+import { isFootballRelevant } from "../src/lib/football-filter.js";
 
 const SERPAPI_BASE = "https://serpapi.com/search.json";
 
@@ -652,7 +652,7 @@ export default {
     // ── news refresh (non-blocking) ──────────────────────────────────────────
     // API-Football transfers/fixtures. Separate try/catch so it can't block others.
     try {
-      const { refreshNewsEvents } = await import("./news-refresh");
+      const { refreshNewsEvents } = await import("./news-refresh.js");
       await refreshNewsEvents();
     } catch (e) {
       console.error("news-refresh failed (non-blocking):", e);
@@ -662,7 +662,7 @@ export default {
     // Own try/catch + internal 20h cache so one "Refresh trends" click updates
     // trends + transfers + news, and any one failing never blocks the others.
     try {
-      const { refreshFootballNews } = await import("./football-news-refresh");
+      const { refreshFootballNews } = await import("./football-news-refresh.js");
       await refreshFootballNews();
     } catch (e) {
       console.error("football-news-refresh failed (non-blocking):", e);

@@ -19,7 +19,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 export async function refreshNewsOnly(): Promise<void> {
   // API-Football transfers/fixtures.
   try {
-    const { refreshNewsEvents } = await import('./news-refresh')
+    const { refreshNewsEvents } = await import('./news-refresh.js')
     await refreshNewsEvents()
   } catch (e) {
     console.error('[news-only] news-refresh failed (non-blocking):', e)
@@ -27,7 +27,7 @@ export async function refreshNewsOnly(): Promise<void> {
 
   // Google AI Mode football news → Gemini parse (own internal 20h cache guard).
   try {
-    const { refreshFootballNews } = await import('./football-news-refresh')
+    const { refreshFootballNews } = await import('./football-news-refresh.js')
     await refreshFootballNews()
   } catch (e) {
     console.error('[news-only] football-news-refresh failed (non-blocking):', e)

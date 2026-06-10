@@ -14,7 +14,7 @@
 //             neither list). Reuses the existing GEMINI_API_KEY — no new key.
 //             On any failure → KEEP (tagged uncertain), never crash the refresh.
 
-import { matchQueryToTeam } from "./trend-signals";
+import { matchQueryToTeam } from "./trend-signals.js";
 
 // ── Stage 1 keyword lists ────────────────────────────────────────────────────
 

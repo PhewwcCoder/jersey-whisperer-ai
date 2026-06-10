@@ -7,7 +7,7 @@ import {
   NATIONAL_TEAM_MAP,
   type NewsEventType,
   type Tier,
-} from "../src/lib/news-score";
+} from "../src/lib/news-score.js";
 
 export const config = {
   runtime: "nodejs",
