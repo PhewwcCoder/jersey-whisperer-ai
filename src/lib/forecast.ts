@@ -369,21 +369,24 @@ export function calculateDemandSpikeScore(
   const averageMargin = getAverageMargin(variants);
   const bestTrend = getBestTrendForProduct(product, signals);
 
-  // DSS composite — NEW six-weight model, NO normalization: DSS = 100 × Σ(wᵢ·Sᵢ).
-  // The CUSTOMER weight flexes with purchase: 0.20 with no confirmed sale, 0.35 once a
+  // DSS composite — six-weight model, NO normalization: DSS = 100 × Σ(wᵢ·Sᵢ).
+  // The CUSTOMER weight flexes with purchase: 0.25 with no confirmed sale, 0.45 once a
   // confirmed sale exists. This makes "a purchase unlock the full range" — and it is
   // intentional:
   //   • confirmed purchase → weights sum to exactly 1.00 → max DSS 100
-  //   • query-only         → weights sum to 0.85         → max DSS 85
-  //   • no customer signal → max DSS ~65 (trend+stock+news+margin+rating only)
+  //   • query-only         → weights sum to 0.80         → max DSS 80
+  //   • no customer signal → max DSS ~55 (trend+stock+news+margin+rating only)
   // Frozen pieces are untouched: computeNewsScore, BASE_M, LAMBDA, tier lists.
+  // Weight-sum check (on-purchase, customer-first tune):
+  //   0.45 + 0.15 + 0.20 + 0.13 + 0.04 + 0.03 = 1.00
+  //   (customer + trend + stock + news + margin + rating)
   const hasPurchase = hasConfirmedPurchase(product);
-  const W_CUSTOMER = hasPurchase ? 0.35 : 0.2; // flexes with a confirmed sale_event
-  const W_TREND = 0.2;
+  const W_CUSTOMER = hasPurchase ? 0.45 : 0.25; // flexes with a confirmed sale_event
+  const W_TREND = 0.15;
   const W_STOCK = 0.2;
   const W_NEWS = 0.13;
-  const W_MARGIN = 0.07;
-  const W_RATING = 0.05;
+  const W_MARGIN = 0.04;
+  const W_RATING = 0.03;
 
   const sCustomer = computeCustomerScore(product, allProducts);
   const { sOrder, sQuery } = computeCustomerScores(product, allProducts); // breakdown display only
