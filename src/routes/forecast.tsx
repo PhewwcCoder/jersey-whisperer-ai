@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/table";
 import { forecastProduct } from "@/lib/forecast";
 import type { NewsEvent } from "@/lib/news-score";
+import { useT } from "@/lib/i18n";
 import { isSupabaseConfigured } from "@/lib/supabase";
 import {
   fetchMarketDiscoveryFromSupabase,
@@ -171,6 +172,7 @@ const FALLBACK_NEWS_EVENTS: NewsEvent[] = [
 ];
 
 function ForecastPage() {
+  const t = useT();
   const { products } = useStore();
   const [trendSignals, setTrendSignals] = useState<StoredTrendSignal[]>(localTrendSignals);
   const [marketDiscovery, setMarketDiscovery] = useState<MarketDiscovery>(fallbackMarketDiscovery);
@@ -632,11 +634,11 @@ function ForecastPage() {
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2.5">
             <h1 className="text-2xl font-bold tracking-tight text-foreground md:text-[28px]">
-              Demand Forecast
+              {t("Demand Forecast")}
             </h1>
           </div>
           <p className="mt-1.5 max-w-2xl text-sm text-muted-foreground">
-            Real-time demand signals to decide what to restock, promote, or hold this week.
+            {t("Real-time demand signals to decide what to restock, promote, or hold this week.")}
           </p>
         </div>
         <div className="shrink-0 text-xs text-muted-foreground sm:text-right">{provenanceText}</div>
@@ -645,28 +647,28 @@ function ForecastPage() {
       {/* KPI strip */}
       <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <KpiCard
-          label="Critical restocks"
+          label={t("Critical restocks")}
           value={criticalCount}
           sub="demand score ≥ 80"
           tone="danger"
           icon={<AlertTriangle className="h-4 w-4" />}
         />
         <KpiCard
-          label="Top demand score"
+          label={t("Top demand score")}
           value={topScore}
           sub="out of 100"
           tone="primary"
           icon={<Gauge className="h-4 w-4" />}
         />
         <KpiCard
-          label="Live market signals"
+          label={t("Live market signals")}
           value={liveSignalCount}
           sub="top + rising queries"
           tone="accent"
           icon={<Radio className="h-4 w-4" />}
         />
         <KpiCard
-          label="Sports events"
+          label={t("Sports events")}
           value={sportsCount}
           sub="feeding S_news"
           tone="info"
@@ -680,11 +682,13 @@ function ForecastPage() {
             <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
               <SectionTitle
                 icon={<Gauge className="h-4 w-4" />}
-                title="Top 10 Product Recommendations"
-                subtitle="AI-ranked actions from inventory, market demand, sports news, customer queries, stock movement, and margin."
+                title={t("Top 10 Product Recommendations")}
+                subtitle={t(
+                  "AI-ranked actions from inventory, market demand, sports news, customer queries, stock movement, and margin.",
+                )}
               />
               <Button variant="outline" size="sm" onClick={() => setMethodologyOpen(true)}>
-                How is the score calculated?
+                {t("How is the score calculated?")}
               </Button>
             </div>
 
@@ -825,7 +829,7 @@ function ForecastPage() {
                 <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent/10 text-accent ring-1 ring-accent/20">
                   <Radio className="h-4 w-4" />
                 </div>
-                <span className="font-semibold text-foreground">Live Market Signals</span>
+                <span className="font-semibold text-foreground">{t("Live Market Signals")}</span>
               </div>
               <div className="mt-1 pl-9 text-xs text-muted-foreground">{provenanceText}</div>
             </div>
@@ -849,7 +853,7 @@ function ForecastPage() {
                 disabled={refreshing}
               >
                 <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
-                {refreshing ? "Refreshing…" : "Refresh trends"}
+                {refreshing ? t("Refreshing…") : t("Refresh trends")}
               </Button>
             </div>
           </div>
@@ -866,12 +870,12 @@ function ForecastPage() {
             </div>
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               <RelatedQueryList
-                title="Top searches"
+                title={t("Top searches")}
                 icon={<Search className="h-3.5 w-3.5" />}
                 items={relatedTop}
               />
               <RelatedQueryList
-                title="Rising"
+                title={t("Rising")}
                 icon={<ArrowUpRight className="h-3.5 w-3.5" />}
                 items={risingDisplay}
                 markOpportunity
@@ -892,8 +896,8 @@ function ForecastPage() {
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <SectionTitle
               icon={<Newspaper className="h-4 w-4" />}
-              title="Sports News Signals"
-              subtitle="Football events feeding the Sports News score (13% of demand score)"
+              title={t("Sports News Signals")}
+              subtitle={t("Football events feeding the Sports News score (13% of demand score)")}
             />
             <div className="flex shrink-0 items-center gap-2">
               {newsRefreshedAt && (
@@ -908,7 +912,7 @@ function ForecastPage() {
                 disabled={newsRefreshing}
               >
                 <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${newsRefreshing ? "animate-spin" : ""}`} />
-                {newsRefreshing ? "Refreshing…" : "Refresh news"}
+                {newsRefreshing ? t("Refreshing…") : t("Refresh news")}
               </Button>
             </div>
           </div>
@@ -916,7 +920,7 @@ function ForecastPage() {
           {newsSorted.length > 0 ? (
             <>
               <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Recent Football Events
+                {t("Recent Football Events")}
               </div>
               <div className="space-y-1">
                 {newsSorted.map((event) => (
@@ -980,7 +984,7 @@ function ForecastPage() {
             </>
           ) : (
             <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-              No sports events yet — click "Refresh trends" to pull live data.
+              {t('No sports events yet — click "Refresh trends" to pull live data.')}
             </div>
           )}
         </CardContent>
@@ -991,8 +995,10 @@ function ForecastPage() {
           <div className="border-b border-border px-5 py-4">
             <SectionTitle
               icon={<Gauge className="h-4 w-4" />}
-              title="Demand Spike Score Table"
-              subtitle="Per-product DSS from demand signals, stock movement, margin, and customer interest."
+              title={t("Demand Spike Score Table")}
+              subtitle={t(
+                "Per-product DSS from demand signals, stock movement, margin, and customer interest.",
+              )}
             />
           </div>
 

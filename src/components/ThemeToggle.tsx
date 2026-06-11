@@ -43,7 +43,7 @@ export function ThemeToggle({ label }: { label?: string }) {
       onClick={toggle}
       aria-label={label ?? "Switch theme"}
       className={`transition-transform hover:scale-105 ${label ? "h-9" : "h-9 w-9"}`}
-      title="Switch theme"
+      title={label ?? "Switch theme"}
     >
       {dark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
       {label && <span className="ml-1.5">{label}</span>}

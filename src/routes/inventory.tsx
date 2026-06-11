@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { lazy, Suspense, useMemo, useState, type ReactNode } from "react";
 import { PageHeader } from "@/components/AppShell";
+import { useT } from "@/lib/i18n";
 import { StatusBadge, TrendBadge } from "@/components/Badges";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,6 +43,7 @@ export const Route = createFileRoute("/inventory")({
 });
 
 function InventoryPage() {
+  const t = useT();
   const { products, deleteProduct, updateProduct } = useStore();
   const [q, setQ] = useState("");
   const [edition, setEdition] = useState("all");
@@ -121,11 +123,11 @@ function InventoryPage() {
   return (
     <>
       <PageHeader
-        title="Inventory"
+        title={t("Inventory")}
         subtitle={`${rows.length} variants across ${products.length} products`}
         actions={
           <Button asChild size="sm">
-            <Link to="/add-product">+ Add product</Link>
+            <Link to="/add-product">{t("+ Add product")}</Link>
           </Button>
         }
       />
@@ -136,7 +138,7 @@ function InventoryPage() {
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               className="pl-9"
-              placeholder="Search product / team / font / print"
+              placeholder={t("Search product / team / font / print")}
               value={q}
               onChange={(event) => setQ(event.target.value)}
             />

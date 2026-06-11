@@ -9,6 +9,7 @@ import {
   Shirt,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useT } from "@/lib/i18n";
 
 const items = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, exact: true },
@@ -21,6 +22,7 @@ const items = [
 
 export function AppSidebar() {
   const path = useRouterState({ select: (s) => s.location.pathname });
+  const t = useT();
   return (
     <aside className="hidden md:flex w-64 shrink-0 flex-col bg-sidebar text-sidebar-foreground border-r border-sidebar-border md:sticky md:top-0 md:self-start md:h-screen md:overflow-y-auto">
       <div className="px-5 py-5 border-b border-sidebar-border">
@@ -51,7 +53,7 @@ export function AppSidebar() {
               )}
             >
               <it.icon className="h-4 w-4" />
-              {it.label}
+              {t(it.label)}
             </Link>
           );
         })}
@@ -62,6 +64,7 @@ export function AppSidebar() {
 
 export function MobileNav() {
   const path = useRouterState({ select: (s) => s.location.pathname });
+  const t = useT();
   return (
     <nav className="md:hidden flex overflow-x-auto gap-1 bg-sidebar text-sidebar-foreground px-2 py-2 border-b border-sidebar-border">
       {items.map((it) => {
@@ -78,7 +81,7 @@ export function MobileNav() {
             )}
           >
             <it.icon className="h-3.5 w-3.5" />
-            {it.label}
+            {t(it.label)}
           </Link>
         );
       })}

@@ -2,6 +2,8 @@ import type { ReactNode } from "react";
 import { Shirt } from "lucide-react";
 import { AppSidebar, MobileNav } from "./AppSidebar";
 import { ThemeToggle } from "./ThemeToggle";
+import { LanguageToggle } from "./LanguageToggle";
+import { useT } from "@/lib/i18n";
 
 function BrandMark({ className = "" }: { className?: string }) {
   return (
@@ -23,6 +25,7 @@ function BrandMark({ className = "" }: { className?: string }) {
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
+  const t = useT();
   return (
     <div className="min-h-screen flex bg-background">
       <AppSidebar />
@@ -30,12 +33,16 @@ export function AppShell({ children }: { children: ReactNode }) {
         <header className="hidden md:flex items-center justify-between border-b border-border bg-background/70 backdrop-blur-xl px-6 py-2.5 sticky top-0 z-30">
           <BrandMark />
           <div className="flex items-center gap-3">
-            <ThemeToggle label="Switch theme" />
+            <LanguageToggle />
+            <ThemeToggle label={t("Switch theme")} />
           </div>
         </header>
         <div className="md:hidden flex items-center justify-between px-3 py-2 border-b border-border bg-background/80 backdrop-blur-xl sticky top-0 z-30">
           <BrandMark />
-          <ThemeToggle />
+          <div className="flex items-center gap-2">
+            <LanguageToggle />
+            <ThemeToggle />
+          </div>
         </div>
         <MobileNav />
         <main className="flex-1 p-4 md:p-8 max-w-[1400px] w-full mx-auto animate-in fade-in duration-300">
