@@ -3,7 +3,7 @@
 // browser), then performs a harmless write per table with the service key:
 //   • jersey_inquiry_events: INSERT with team=null (ignored by inquiry counts), then DELETE
 //   • forecast_scores:       INSERT with product_id=null, then DELETE
-//   • products:              no-op UPDATE (sets query_count to its current value)
+//   • products:              real value change — bumps inquiries_7d by 1, then restores it
 // Prints PASS/FAIL per table. Cleans up after itself.
 import { createClient } from "@supabase/supabase-js";
 import { readFileSync } from "node:fs";
@@ -63,10 +63,21 @@ const { data: fsRow } = await admin
   .select("id")
   .single();
 
-// 3. products no-op update (same value back)
-const { data: prod } = await admin.from("products").select("id, query_count").limit(1).single();
+// 3. products: REAL value change on a column that exists in the live table
+//    (id, team, type, size, stock, wholesale_cost, retail_price, inquiries_7d,
+//    sales_7d, created_at) — bump inquiries_7d, restored in cleanup below.
+const { data: prod, error: prodReadError } = await admin
+  .from("products")
+  .select("id, inquiries_7d")
+  .limit(1)
+  .single();
+if (prodReadError) console.error("products read failed:", prodReadError.message);
 if (prod) {
-  await admin.from("products").update({ query_count: prod.query_count }).eq("id", prod.id);
+  const { error } = await admin
+    .from("products")
+    .update({ inquiries_7d: (prod.inquiries_7d ?? 0) + 1 })
+    .eq("id", prod.id);
+  if (error) console.error("products update failed:", error.message);
 }
 
 await new Promise((resolve) => setTimeout(resolve, 6000));
@@ -78,5 +89,9 @@ for (const table of TABLES) {
 // cleanup
 await admin.from("jersey_inquiry_events").delete().eq("message_id", testId);
 if (fsRow?.id) await admin.from("forecast_scores").delete().eq("id", fsRow.id);
+if (prod) {
+  // restore the original inquiries_7d value
+  await admin.from("products").update({ inquiries_7d: prod.inquiries_7d ?? 0 }).eq("id", prod.id);
+}
 await anon.removeChannel(channel);
 process.exit(0);
