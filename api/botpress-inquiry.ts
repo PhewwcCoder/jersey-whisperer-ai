@@ -183,13 +183,27 @@ function keywordExtract(rawText: string): Extracted {
   return { team, player, jersey_type: detectJerseyType(t), season: detectSeason(t) };
 }
 
-function supabaseEnv(): { url: string; key: string } | null {
-  const url = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL)
-    ?.trim()
-    .replace(/\/$/, "");
-  const key = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY)?.trim();
+interface SupabaseEnv {
+  url: string;
+  key: string;
+  urlSource: string;
+  keySource: string;
+}
+
+function supabaseEnv(): SupabaseEnv | null {
+  const serverUrl = process.env.SUPABASE_URL?.trim();
+  const viteUrl = process.env.VITE_SUPABASE_URL?.trim();
+  const serverKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  const viteKey = process.env.VITE_SUPABASE_ANON_KEY?.trim();
+  const url = (serverUrl || viteUrl)?.replace(/\/$/, "");
+  const key = serverKey || viteKey;
   if (!url || !key) return null;
-  return { url, key };
+  return {
+    url,
+    key,
+    urlSource: serverUrl ? "SUPABASE_URL" : "VITE_SUPABASE_URL",
+    keySource: serverKey ? "SUPABASE_SERVICE_ROLE_KEY" : "VITE_SUPABASE_ANON_KEY",
+  };
 }
 
 // Most-recent non-null team already recorded for this conversation. Lets a live
@@ -197,7 +211,7 @@ function supabaseEnv(): { url: string; key: string } | null {
 // customer mentioned earlier — the single-message equivalent of the backfill's
 // per-conversation context.
 async function lastTeamForConversation(
-  sb: { url: string; key: string },
+  sb: SupabaseEnv,
   conversationId: string | null,
 ): Promise<string | null> {
   if (!conversationId) return null;
@@ -217,23 +231,25 @@ async function lastTeamForConversation(
   }
 }
 
-async function upsertEvent(
-  sb: { url: string; key: string },
-  row: Record<string, unknown>,
-): Promise<void> {
+// Returns true when the row was newly inserted, false when message_id already existed
+// (ignore-duplicates + return=representation: PostgREST returns the inserted rows only,
+// so an empty array means the event was already counted).
+async function upsertEvent(sb: SupabaseEnv, row: Record<string, unknown>): Promise<boolean> {
   const res = await fetch(`${sb.url}/rest/v1/jersey_inquiry_events?on_conflict=message_id`, {
     method: "POST",
     headers: {
       apikey: sb.key,
       Authorization: `Bearer ${sb.key}`,
       "Content-Type": "application/json",
-      Prefer: "resolution=ignore-duplicates,return=minimal",
+      Prefer: "resolution=ignore-duplicates,return=representation",
     },
     body: JSON.stringify([row]),
   });
   if (!res.ok) {
     throw new Error(`Supabase upsert ${res.status}: ${(await res.text()).slice(0, 200)}`);
   }
+  const inserted = (await res.json()) as unknown[];
+  return Array.isArray(inserted) && inserted.length > 0;
 }
 
 export default {
@@ -277,7 +293,8 @@ export default {
 
     console.log(
       `[botpress-inquiry] method=${request.method} bodyKeys=[${Object.keys(body).join(",")}]` +
-        ` messageId=${messageId} channel=${channel} deepseek=${Boolean(deepSeekKey)}`,
+        ` messageId=${messageId} channel=${channel} deepseek=${Boolean(deepSeekKey)}` +
+        ` env=${sb.urlSource}+${sb.keySource}`,
     );
     console.log(`[botpress-inquiry] text="${text.slice(0, 160)}"`);
 
@@ -321,8 +338,9 @@ export default {
         ` type=${extracted.jersey_type ?? "null"} season=${extracted.season ?? "null"} via=${via}`,
     );
 
+    let inserted: boolean;
     try {
-      await upsertEvent(sb, {
+      inserted = await upsertEvent(sb, {
         message_id: messageId,
         conversation_id: conversationId,
         channel,
@@ -343,8 +361,16 @@ export default {
     }
 
     console.log(
-      `[botpress-inquiry] stored message_id=${messageId} team=${extracted.team ?? "null"}`,
+      `[botpress-inquiry] ${inserted ? "stored" : "duplicate (already counted)"}` +
+        ` message_id=${messageId} team=${extracted.team ?? "null"} via=${via}`,
     );
-    return jsonResponse({ ok: true, stored: true, team: extracted.team, messageId });
+    return jsonResponse({
+      ok: true,
+      stored: true,
+      duplicate: !inserted,
+      team: extracted.team,
+      via,
+      messageId,
+    });
   },
 };
