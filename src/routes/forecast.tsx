@@ -1153,7 +1153,7 @@ function ForecastPage() {
             <div className="rounded-lg border border-border bg-muted/30 p-4">
               <div className="font-medium text-foreground">Demand Spike Score</div>
               <div className="mt-2 whitespace-pre-line text-muted-foreground">
-                {`25–45% Customer Signal (queries + confirmed sales)
+                {`30–45% Customer Signal (queries + confirmed sales)
 15% Market Trend
 20% Stock Reduction Velocity
 13% Sports News
@@ -1161,15 +1161,15 @@ function ForecastPage() {
 3% Seller Rating`}
               </div>
               <div className="mt-2 text-xs text-muted-foreground/80">
-                DSS = 100 × Σwᵢ·Sᵢ (no normalization). The customer weight is 0.25 until a confirmed
+                DSS = 100 × Σwᵢ·Sᵢ (no normalization). The customer weight is 0.30 until a confirmed
                 purchase exists, then 0.45 — so a purchase unlocks the full 0–100 range (query-only
-                caps at 80, no customer signal caps ~55).
+                caps at 85, no customer signal caps ~55).
               </div>
             </div>
 
             <MethodRow
               title="Customer Signal"
-              body="customer queries + confirmed sales, 14-day recency decay (saturating); weight 0.25 → 0.45 once a sale is confirmed"
+              body="customer queries + confirmed sales, 14-day recency decay (saturating); weight 0.30 → 0.45 once a sale is confirmed"
             />
             <MethodRow
               title="Market Trend"
