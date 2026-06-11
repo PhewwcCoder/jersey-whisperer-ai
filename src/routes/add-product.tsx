@@ -3,6 +3,7 @@ import { lazy, Suspense } from "react";
 import { PageHeader } from "@/components/AppShell";
 import { Card, CardContent } from "@/components/ui/card";
 import { useStore } from "@/lib/store";
+import { useT } from "@/lib/i18n";
 import { toast } from "sonner";
 
 const ProductForm = lazy(() =>
@@ -15,15 +16,23 @@ export const Route = createFileRoute("/add-product")({
 });
 
 function AddPage() {
+  const t = useT();
   const { addProduct } = useStore();
   const navigate = useNavigate();
 
   return (
     <>
-      <PageHeader title="Add Product" subtitle="New jersey listing for your AI-ready inventory" />
+      <PageHeader
+        title={t("Add Product")}
+        subtitle={t("New jersey listing for your AI-ready inventory")}
+      />
       <Card>
         <CardContent className="p-6">
-          <Suspense fallback={<div className="p-4 text-sm text-muted-foreground">Loading form...</div>}>
+          <Suspense
+            fallback={
+              <div className="p-4 text-sm text-muted-foreground">{t("Loading form...")}</div>
+            }
+          >
             <ProductForm
               onSubmit={(p) => {
                 addProduct(p);

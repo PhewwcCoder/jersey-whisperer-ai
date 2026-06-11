@@ -4,6 +4,7 @@ import { PageHeader } from "@/components/AppShell";
 import { forecastProduct } from "@/lib/forecast";
 import { bdt } from "@/lib/inventory-utils";
 import { useStore } from "@/lib/store";
+import { useT } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -69,6 +70,7 @@ function Stat({
 }
 
 function DashboardPage() {
+  const t = useT();
   const { products } = useStore();
 
   const stats = useMemo(() => {
@@ -119,74 +121,74 @@ function DashboardPage() {
   return (
     <>
       <PageHeader
-        title="Dashboard"
-        subtitle="24/7 AI inventory intelligence for jersey sellers"
+        title={t("Dashboard")}
+        subtitle={t("24/7 AI inventory intelligence for jersey sellers")}
       />
 
       <div className="mb-6 grid gap-3 md:grid-cols-3">
         <ImpactCard
           icon={DollarSign}
-          title="Revenue Impact Projection"
+          title={t("Revenue Impact Projection")}
           value="+15-30%"
-          note="Projected uplift from AI-assisted replies and better demand-aware replenishment."
+          note={t("Projected uplift from AI-assisted replies and better demand-aware replenishment.")}
         />
         <ImpactCard
           icon={ShieldCheck}
-          title="Inventory Stockout Reduction Target"
+          title={t("Inventory Stockout Reduction Target")}
           value="25%"
-          note="Target reduction by using deterministic Demand Spike Score prioritization."
+          note={t("Target reduction by using deterministic Demand Spike Score prioritization.")}
         />
         <ImpactCard
           icon={MessageSquareText}
-          title="Conversion Rate Improvement"
+          title={t("Conversion Rate Improvement")}
           value="24/7 AI Chat"
-          note="Always-on reply coverage helps convert off-hour Messenger and WhatsApp leads."
+          note={t("Always-on reply coverage helps convert off-hour Messenger and WhatsApp leads.")}
         />
       </div>
 
       <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
-        <Stat icon={Boxes} label="Total products" value={String(products.length)} />
-        <Stat icon={Layers} label="Total stock units" value={String(stats.totalUnits)} />
+        <Stat icon={Boxes} label={t("Total products")} value={String(products.length)} />
+        <Stat icon={Layers} label={t("Total stock units")} value={String(stats.totalUnits)} />
         <Stat
           icon={AlertTriangle}
-          label="Low stock"
+          label={t("Low stock")}
           value={String(stats.lowStock)}
           accent="bg-warning/15 text-warning-foreground"
         />
         <Stat
           icon={PackageX}
-          label="Out of stock"
+          label={t("Out of stock")}
           value={String(stats.outOfStock)}
           accent="bg-destructive/10 text-destructive"
         />
         <Stat
           icon={Clock}
-          label="Preorder"
+          label={t("Preorder")}
           value={String(stats.preorder)}
           accent="bg-info/15 text-info"
         />
-        <Stat icon={CalendarClock} label="Expected restock" value={String(stats.restocking)} />
+        <Stat icon={CalendarClock} label={t("Expected restock")} value={String(stats.restocking)} />
         <Stat
           icon={Wallet}
-          label="Inventory value"
+          label={t("Inventory value")}
           value={bdt(stats.invValue)}
           accent="bg-primary/10 text-primary"
         />
         <Stat
           icon={TrendingUp}
-          label="Potential profit"
+          label={t("Potential profit")}
           value={bdt(stats.profit)}
           accent="bg-success/15 text-success"
         />
         <Stat
           icon={Flame}
-          label="High demand"
+          label={t("High demand")}
           value={String(dashboardSignals.highDemandCount)}
           accent="bg-accent text-accent-foreground"
         />
         <Stat
           icon={Brain}
-          label="AI restock alerts"
+          label={t("AI restock alerts")}
           value={String(dashboardSignals.restockAlertCount)}
           accent="bg-primary/10 text-primary"
         />
@@ -200,9 +202,11 @@ function DashboardPage() {
                 <Brain className="h-4 w-4" />
               </div>
               <div>
-                <div className="font-semibold">Today's AI Business Alerts</div>
+                <div className="font-semibold">{t("Today's AI Business Alerts")}</div>
                 <div className="text-xs text-muted-foreground">
-                  Demand score insights generated from trend signals, stock levels, and live selling pressure
+                  {t(
+                    "Demand score insights generated from trend signals, stock levels, and live selling pressure",
+                  )}
                 </div>
               </div>
             </div>
@@ -231,33 +235,33 @@ function DashboardPage() {
           <CardContent className="p-5">
             <div className="mb-3 flex items-center gap-2">
               <Flame className="h-4 w-4 text-primary" />
-              <div className="font-semibold text-foreground">Today's Selling Signals</div>
+              <div className="font-semibold text-foreground">{t("Today's Selling Signals")}</div>
             </div>
             <div className="grid gap-3">
               <SignalTile
-                title="Market Demand"
+                title={t("Market Demand")}
                 body={
                   dashboardSignals.topTeams.length > 1
                     ? `${dashboardSignals.topTeams.join(" and ")} kits are trending in BD searches this week.`
-                    : "Football jersey demand is active in BD searches this week."
+                    : t("Football jersey demand is active in BD searches this week.")
                 }
               />
               <SignalTile
-                title="Stock Pressure"
+                title={t("Stock Pressure")}
                 body={`${stats.lowStock} variants are low stock and need attention before match-day demand spikes.`}
               />
               <SignalTile
-                title="Restock Priority"
+                title={t("Restock Priority")}
                 body={`${dashboardSignals.restockAlertCount} products need AI restock attention based on demand score signals.`}
               />
               <SignalTile
-                title="Conversion Opportunity"
-                body="24/7 chat can capture late-night football buyers when the seller is offline."
+                title={t("Conversion Opportunity")}
+                body={t("24/7 chat can capture late-night football buyers when the seller is offline.")}
               />
             </div>
             <div className="mt-4">
               <Button asChild>
-                <Link to="/forecast">Open Forecast</Link>
+                <Link to="/forecast">{t("Open Forecast")}</Link>
               </Button>
             </div>
           </CardContent>

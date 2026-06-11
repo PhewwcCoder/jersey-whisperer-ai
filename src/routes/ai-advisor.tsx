@@ -6,6 +6,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { forecastProduct } from "@/lib/forecast";
 import { useStore } from "@/lib/store";
+import { useT } from "@/lib/i18n";
 import type { Product } from "@/lib/types";
 import {
   AlertTriangle,
@@ -144,6 +145,7 @@ function matchesFilter(
 }
 
 function AdvisorPage() {
+  const t = useT();
   const { products } = useStore();
   const [activeFilter, setActiveFilter] = useState<AdvisorFilter>("All");
   const [reviewedIds, setReviewedIds] = useState<Record<string, boolean>>({});
@@ -323,28 +325,31 @@ function AdvisorPage() {
   return (
     <>
       <PageHeader
-        title="AI Stock Advisor"
-        subtitle="Actionable restock, promotion, and inventory alerts based on your products and demand signals."
+        title={t("AI Stock Advisor")}
+        subtitle={t(
+          "Actionable restock, promotion, and inventory alerts based on your products and demand signals.",
+        )}
       />
 
       <Card className="mb-4 border-accent/40 bg-accent/5">
         <CardContent className="flex items-start gap-3 p-4">
           <Brain className="mt-0.5 h-5 w-5 text-primary" />
           <div className="text-sm">
-            <div className="font-semibold text-foreground">Seller-ready inventory guidance</div>
+            <div className="font-semibold text-foreground">{t("Seller-ready inventory guidance")}</div>
             <div className="text-muted-foreground">
-              Your AI advisor reviews stock, margin, customer interest, and demand signals to suggest
-              what to restock, promote, or hold — without guessing prices or inventing products.
+              {t(
+                "Your AI advisor reviews stock, margin, customer interest, and demand signals to suggest what to restock, promote, or hold — without guessing prices or inventing products.",
+              )}
             </div>
           </div>
         </CardContent>
       </Card>
 
       <div className="mb-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <SummaryTile title="Urgent actions" value={summary.urgent} accent="bg-destructive/10 text-destructive border-destructive/20" />
-        <SummaryTile title="Restock soon" value={summary.restock} accent="bg-warning/10 text-warning-foreground border-warning/30" />
-        <SummaryTile title="Promote this week" value={summary.promote} accent="bg-primary/10 text-primary border-primary/20" />
-        <SummaryTile title="Safe to hold" value={summary.hold} accent="bg-muted text-muted-foreground border-border" />
+        <SummaryTile title={t("Urgent actions")} value={summary.urgent} accent="bg-destructive/10 text-destructive border-destructive/20" />
+        <SummaryTile title={t("Restock soon")} value={summary.restock} accent="bg-warning/10 text-warning-foreground border-warning/30" />
+        <SummaryTile title={t("Promote this week")} value={summary.promote} accent="bg-primary/10 text-primary border-primary/20" />
+        <SummaryTile title={t("Safe to hold")} value={summary.hold} accent="bg-muted text-muted-foreground border-border" />
       </div>
 
       <div className="mb-5 flex flex-wrap gap-2">
@@ -358,7 +363,7 @@ function AdvisorPage() {
               className="transition-all duration-200 hover:scale-[1.02]"
               onClick={() => setActiveFilter(filter)}
             >
-              {filter}
+              {t(filter)}
             </Button>
           ),
         )}
@@ -392,10 +397,10 @@ function AdvisorPage() {
                             : priorityStyles.badge
                         }
                       >
-                        {reviewed ? "Reviewed" : recommendation.urgency}
+                        {reviewed ? t("Reviewed") : t(recommendation.urgency)}
                       </Badge>
                       <div className="text-xs uppercase tracking-wider text-muted-foreground">
-                        {getTypeLabel(recommendation.type)}
+                        {t(getTypeLabel(recommendation.type))}
                       </div>
                     </div>
                   </div>
@@ -407,14 +412,14 @@ function AdvisorPage() {
                           {recommendation.productName}
                         </div>
                         <div className="text-sm text-muted-foreground">
-                          Size: {recommendation.sizeLabel}
+                          {t("Size")}: {recommendation.sizeLabel}
                         </div>
                       </div>
 
                       <div className="grid gap-3 text-sm md:grid-cols-3">
-                        <InfoBlock label="Reason" value={recommendation.reason} />
-                        <InfoBlock label="Suggested action" value={recommendation.action} accent />
-                        <InfoBlock label="Business impact" value={recommendation.impact} />
+                        <InfoBlock label={t("Reason")} value={recommendation.reason} />
+                        <InfoBlock label={t("Suggested action")} value={recommendation.action} accent />
+                        <InfoBlock label={t("Business impact")} value={recommendation.impact} />
                       </div>
 
                       <div>
@@ -431,21 +436,21 @@ function AdvisorPage() {
                           }
                         >
                           {expanded ? <ChevronUp className="mr-1 h-4 w-4" /> : <ChevronDown className="mr-1 h-4 w-4" />}
-                          {expanded ? "Hide details" : "Why?"}
+                          {expanded ? t("Hide details") : t("Why?")}
                         </Button>
                         {expanded && (
                           <div className="mt-2 rounded-lg border border-border bg-background/80 p-3 text-sm text-foreground/90">
-                            <div className="mb-2 font-medium">Why this matters</div>
+                            <div className="mb-2 font-medium">{t("Why this matters")}</div>
                             <div className="mb-3 text-muted-foreground">
                               {recommendation.productName} {recommendation.sizeLabel !== "-" ? `${recommendation.sizeLabel}` : ""}
                               {" "}has {recommendation.currentStock} pcs available while customer interest is at {recommendation.recentInquiries} recent inquiries. If this item slips out of stock, buyers may leave without ordering.
                             </div>
                             <div className="grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-5">
-                              <DetailPill label="Current stock" value={`${recommendation.currentStock} pcs`} />
-                              <DetailPill label="Customer interest" value={`${recommendation.recentInquiries} inquiries`} />
-                              <DetailPill label="Trend signal" value={recommendation.trendSignal} />
-                              <DetailPill label="Margin" value={`${recommendation.marginPercent}%`} />
-                              <DetailPill label="Next step" value={recommendation.nextStep} />
+                              <DetailPill label={t("Current stock")} value={`${recommendation.currentStock} pcs`} />
+                              <DetailPill label={t("Customer interest")} value={`${recommendation.recentInquiries} inquiries`} />
+                              <DetailPill label={t("Trend signal")} value={t(recommendation.trendSignal)} />
+                              <DetailPill label={t("Margin")} value={`${recommendation.marginPercent}%`} />
+                              <DetailPill label={t("Next step")} value={recommendation.nextStep} />
                             </div>
                           </div>
                         )}
@@ -458,7 +463,7 @@ function AdvisorPage() {
                         size="sm"
                         className="w-full transition-all duration-200 hover:scale-[1.02] xl:w-[160px]"
                       >
-                        <Link to="/inventory">View Product</Link>
+                        <Link to="/inventory">{t("View Product")}</Link>
                       </Button>
                       <Button
                         asChild
@@ -467,7 +472,7 @@ function AdvisorPage() {
                         className="w-full transition-all duration-200 hover:scale-[1.02] xl:w-[160px]"
                       >
                         <Link to="/inventory">
-                          <Pencil className="mr-1 h-4 w-4" /> Edit Stock
+                          <Pencil className="mr-1 h-4 w-4" /> {t("Edit Stock")}
                         </Link>
                       </Button>
                       <Button
@@ -484,7 +489,7 @@ function AdvisorPage() {
                         }
                         disabled={reviewed}
                       >
-                        {reviewed ? "Reviewed" : "Mark Reviewed"}
+                        {reviewed ? t("Reviewed") : t("Mark Reviewed")}
                       </Button>
                       <Button
                         type="button"
@@ -495,13 +500,13 @@ function AdvisorPage() {
                           const note = `${recommendation.productName} (${recommendation.sizeLabel}) - ${recommendation.action}`;
                           try {
                             await navigator.clipboard.writeText(note);
-                            toast.success("Supplier note copied");
+                            toast.success(t("Supplier note copied"));
                           } catch {
-                            toast.error("Could not copy supplier note");
+                            toast.error(t("Could not copy supplier note"));
                           }
                         }}
                       >
-                        <Copy className="mr-1 h-4 w-4" /> Copy Supplier Note
+                        <Copy className="mr-1 h-4 w-4" /> {t("Copy Supplier Note")}
                       </Button>
                     </div>
                   </div>
@@ -514,7 +519,7 @@ function AdvisorPage() {
         {filteredRecommendations.length === 0 && (
           <Card>
             <CardContent className="p-8 text-center text-muted-foreground">
-              No advisor cards match this filter right now.
+              {t("No advisor cards match this filter right now.")}
             </CardContent>
           </Card>
         )}
