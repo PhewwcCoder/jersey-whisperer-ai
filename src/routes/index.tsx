@@ -1,10 +1,15 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "@/components/AppShell";
 import { forecastProduct } from "@/lib/forecast";
 import { bdt } from "@/lib/inventory-utils";
 import { useStore } from "@/lib/store";
 import { useT } from "@/lib/i18n";
+import { subscribeToTableChanges } from "@/lib/realtime";
+import {
+  applyJerseyInquiryCountsToProducts,
+  fetchJerseyInquiryCounts,
+} from "@/lib/supabase-service";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -71,7 +76,49 @@ function Stat({
 
 function DashboardPage() {
   const t = useT();
-  const { products } = useStore();
+  const { products, setProducts } = useStore();
+  // Team name of the most recent live Botpress inquiry — drives the brief green
+  // flash + "+1" badge on matching alert rows. Cleared after a short delay.
+  const [inquiryFlashTeam, setInquiryFlashTeam] = useState<string | null>(null);
+  const productsRef = useRef(products);
+  productsRef.current = products;
+
+  // Realtime: live inquiry counts (requires Realtime enabled on
+  // public.jersey_inquiry_events — see src/lib/realtime.ts). Demo flow:
+  // Messenger message → Botpress → /api/botpress-inquiry inserts a row →
+  // this subscription fires → counts re-fetch → KPI/alert tiles update live.
+  useEffect(() => {
+    let flashTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const unsubscribe = subscribeToTableChanges(
+      "jersey-inquiry-events-changes",
+      "jersey_inquiry_events",
+      (payload) => {
+        if (payload.eventType !== "INSERT") return;
+
+        const team = (payload.new as { team?: string | null })?.team;
+        if (team) {
+          setInquiryFlashTeam(team);
+          clearTimeout(flashTimer);
+          flashTimer = setTimeout(() => setInquiryFlashTeam(null), 2500);
+        }
+
+        // Re-pull aggregated counts and fold them into products so every
+        // count-derived number on this page updates without a refresh.
+        void fetchJerseyInquiryCounts().then((counts) => {
+          if (!counts.length) return;
+          const next = applyJerseyInquiryCountsToProducts(productsRef.current, counts);
+          if (next !== productsRef.current) setProducts(next);
+        });
+      },
+    );
+
+    return () => {
+      clearTimeout(flashTimer);
+      unsubscribe();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const stats = useMemo(() => {
     let totalUnits = 0;
@@ -211,22 +258,36 @@ function DashboardPage() {
               </div>
             </div>
             <ul className="space-y-2">
-              {dashboardSignals.topAlerts.map((forecast) => (
-                <li
-                  key={forecast.product_id}
-                  className="flex items-start gap-3 rounded-md border border-border bg-muted/30 p-3"
-                >
-                  <Badge variant="outline" className={forecast.urgencyColor}>
-                    {forecast.action}
-                  </Badge>
-                  <div className="flex-1 text-sm text-foreground/90">
-                    <span className="font-medium">{forecast.product_name}</span> - {forecast.explanation}
-                  </div>
-                  <span className="text-xs font-mono text-muted-foreground">
-                    {forecast.demandSpikeScore}/100
-                  </span>
-                </li>
-              ))}
+              {dashboardSignals.topAlerts.map((forecast) => {
+                // Brief green flash + "+1" chip when a live inquiry just arrived
+                // for this row's team (simple CSS transition, reverts on clear).
+                const justInquired = inquiryFlashTeam !== null && forecast.team === inquiryFlashTeam;
+                return (
+                  <li
+                    key={forecast.product_id}
+                    className={`flex items-start gap-3 rounded-md border p-3 transition-colors duration-700 ${
+                      justInquired
+                        ? "border-success/60 bg-success/15"
+                        : "border-border bg-muted/30"
+                    }`}
+                  >
+                    <Badge variant="outline" className={forecast.urgencyColor}>
+                      {forecast.action}
+                    </Badge>
+                    <div className="flex-1 text-sm text-foreground/90">
+                      <span className="font-medium">{forecast.product_name}</span> - {forecast.explanation}
+                    </div>
+                    {justInquired && (
+                      <span className="rounded-full bg-success/20 px-2 py-0.5 text-xs font-semibold text-success">
+                        +1
+                      </span>
+                    )}
+                    <span className="text-xs font-mono text-muted-foreground">
+                      {forecast.demandSpikeScore}/100
+                    </span>
+                  </li>
+                );
+              })}
             </ul>
           </CardContent>
         </Card>

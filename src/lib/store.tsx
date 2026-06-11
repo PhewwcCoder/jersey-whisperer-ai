@@ -8,6 +8,7 @@ import {
   upsertProductToSupabase,
 } from "./supabase-service";
 import { isSupabaseConfigured } from "./supabase";
+import { subscribeToTableChanges } from "./realtime";
 import type { Product } from "./types";
 
 export const STORAGE_KEY = "jerseybecho_products_v4";
@@ -88,6 +89,39 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  // Realtime: live inventory updates (requires Realtime enabled on public.products —
+  // see src/lib/realtime.ts). When any client changes stock, re-pull products so
+  // stock numbers and status badges (Available/Low Stock/Out of Stock colors)
+  // update everywhere without a refresh. Bursts (rapid +/- clicks, bulk seeds —
+  // including the echo of this client's own upserts) are debounced into one
+  // refetch of the final server state.
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const unsubscribe = subscribeToTableChanges("products-changes", "products", () => {
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        const remoteProducts = await fetchProductsFromSupabase();
+        if (cancelled || remoteProducts.length === 0) return;
+        // Re-apply Botpress inquiry counts so the refetch never drops them.
+        const inquiryCounts = await fetchJerseyInquiryCounts();
+        if (cancelled) return;
+        const next = applyJerseyInquiryCountsToProducts(sanitize(remoteProducts), inquiryCounts);
+        setProductsState(next);
+        persistLocalProducts(next);
+      }, 600);
+    });
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      unsubscribe();
     };
   }, []);
 

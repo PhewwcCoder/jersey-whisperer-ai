@@ -36,6 +36,7 @@ import {
 import { forecastProduct } from "@/lib/forecast";
 import type { NewsEvent } from "@/lib/news-score";
 import { useT } from "@/lib/i18n";
+import { subscribeToTableChanges } from "@/lib/realtime";
 import { isSupabaseConfigured } from "@/lib/supabase";
 import {
   fetchMarketDiscoveryFromSupabase,
@@ -174,6 +175,14 @@ const FALLBACK_NEWS_EVENTS: NewsEvent[] = [
 function ForecastPage() {
   const t = useT();
   const { products } = useStore();
+  // Live DSS overlay from Supabase Realtime (requires Realtime enabled on
+  // public.forecast_scores — see src/lib/realtime.ts). NOTE: today this app
+  // computes DSS client-side (forecastProduct); forecast_scores rows arrive only
+  // from saveForecastScoreToSupabase or an external/server recalculation
+  // pipeline. When such a row lands, its score overrides the row's displayed
+  // DSS and the row flashes briefly.
+  const [liveDss, setLiveDss] = useState<Record<string, number>>({});
+  const [liveDssFlashIds, setLiveDssFlashIds] = useState<Set<string>>(new Set());
   const [trendSignals, setTrendSignals] = useState<StoredTrendSignal[]>(localTrendSignals);
   const [marketDiscovery, setMarketDiscovery] = useState<MarketDiscovery>(fallbackMarketDiscovery);
   // Selected Google Trends geo. SerpApi is only ever called on Refresh; switching geo just
@@ -573,6 +582,36 @@ function ForecastPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geo]);
+
+  // Realtime subscription for forecast_scores (INSERT/UPDATE → live DSS overlay).
+  // Cleans up the channel on unmount via the returned unsubscribe.
+  useEffect(() => {
+    let flashTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const unsubscribe = subscribeToTableChanges(
+      "forecast-scores-changes",
+      "forecast_scores",
+      (payload) => {
+        if (payload.eventType !== "INSERT" && payload.eventType !== "UPDATE") return;
+        const row = payload.new as { product_id?: string | null; demand_spike_score?: unknown };
+        const productId = row?.product_id;
+        // numeric columns can arrive as strings over Realtime — coerce safely.
+        const score = Number(row?.demand_spike_score);
+        if (!productId || !Number.isFinite(score)) return;
+
+        const rounded = Math.round(score);
+        setLiveDss((current) => ({ ...current, [productId]: rounded }));
+        setLiveDssFlashIds((current) => new Set(current).add(productId));
+        clearTimeout(flashTimer);
+        flashTimer = setTimeout(() => setLiveDssFlashIds(new Set()), 2500);
+      },
+    );
+
+    return () => {
+      clearTimeout(flashTimer);
+      unsubscribe();
+    };
+  }, []);
 
   const missedInsights = useMemo(() => {
     const insights: string[] = [];
@@ -1022,7 +1061,12 @@ function ForecastPage() {
               </TableHeader>
               <TableBody>
                 {forecasts.map((forecast) => (
-                  <TableRow key={forecast.product_id}>
+                  <TableRow
+                    key={forecast.product_id}
+                    className={`transition-colors duration-700 ${
+                      liveDssFlashIds.has(forecast.product_id) ? "bg-success/10" : ""
+                    }`}
+                  >
                     <TableCell className="font-medium text-foreground">
                       {forecast.product_name}
                     </TableCell>
@@ -1053,14 +1097,23 @@ function ForecastPage() {
                       <div className="flex items-center justify-end gap-2">
                         <div className="hidden h-1.5 w-12 overflow-hidden rounded-full bg-muted lg:block">
                           <div
-                            className="h-full rounded-full bg-gradient-to-r from-primary to-accent"
+                            className="h-full rounded-full bg-gradient-to-r from-primary to-accent transition-all duration-700"
                             style={{
-                              width: `${Math.min(100, Math.max(0, forecast.demandSpikeScore))}%`,
+                              width: `${Math.min(
+                                100,
+                                Math.max(0, liveDss[forecast.product_id] ?? forecast.demandSpikeScore),
+                              )}%`,
                             }}
                           />
                         </div>
-                        <span className="font-mono text-sm font-semibold tabular-nums text-foreground">
-                          {forecast.demandSpikeScore}
+                        <span
+                          className={`font-mono text-sm font-semibold tabular-nums transition-colors duration-700 ${
+                            liveDssFlashIds.has(forecast.product_id)
+                              ? "text-success"
+                              : "text-foreground"
+                          }`}
+                        >
+                          {liveDss[forecast.product_id] ?? forecast.demandSpikeScore}
                         </span>
                       </div>
                     </TableCell>
