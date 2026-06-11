@@ -37,7 +37,11 @@ export function subscribeToTableChanges(
   void getSupabaseClient().then((supabase) => {
     if (!supabase || cancelled) return;
     channel = supabase
-      .channel(channelName)
+      // Unique topic per subscription: Phoenix rejects joining the same topic
+      // twice on one socket, which breaks remounts (React StrictMode dev
+      // double-mount, fast route changes) when the old channel's async
+      // removal hasn't finished yet.
+      .channel(`${channelName}-${Math.random().toString(36).slice(2, 10)}`)
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table },

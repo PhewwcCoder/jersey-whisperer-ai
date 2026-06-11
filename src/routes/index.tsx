@@ -10,6 +10,7 @@ import {
   applyJerseyInquiryCountsToProducts,
   fetchJerseyInquiryCounts,
 } from "@/lib/supabase-service";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -96,7 +97,14 @@ function DashboardPage() {
       (payload) => {
         if (payload.eventType !== "INSERT") return;
 
-        const team = (payload.new as { team?: string | null })?.team;
+        const row = payload.new as { team?: string | null; raw_text?: string | null };
+        const team = row?.team;
+        // Unmissable cue for the live demo: a toast fires for EVERY incoming
+        // inquiry (the row flash below only shows when the team happens to be
+        // in the top-3 alerts, which made the demo easy to miss).
+        toast.success(`+1 live inquiry${team ? `: ${team}` : ""}`, {
+          description: row?.raw_text ?? undefined,
+        });
         if (team) {
           setInquiryFlashTeam(team);
           clearTimeout(flashTimer);
