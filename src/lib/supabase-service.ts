@@ -120,6 +120,11 @@ function sanitizeProduct(candidate: Partial<Product> & { id?: string }): Product
     trend_reason: candidate.trend_reason ?? "",
     popularity_score: safeNumber(candidate.popularity_score, 60),
     query_count: safeNumber(candidate.query_count, 0),
+    baseline_query_count:
+      typeof candidate.baseline_query_count === "number" &&
+      Number.isFinite(candidate.baseline_query_count)
+        ? Math.max(0, candidate.baseline_query_count)
+        : undefined,
     // CustomerEvents (query / confirmed_sale) drive S_customer and stock
     // reduction velocity in the DSS — dropping them here would reset live
     // scores on every Supabase refetch.
@@ -215,13 +220,23 @@ export function applyJerseyInquiryCountsToProducts(
     const botpressCount = inquiryCountForProduct(product, counts);
     if (botpressCount <= 0) return product;
 
-    const existingCount = safeCount(product.query_count);
-    if (existingCount === botpressCount) return product;
+    // Live Botpress inquiries ADD to the seeded demand baseline instead of
+    // replacing it. Replacement made the FIRST real inquiry for a team CRASH
+    // its score: seeded query_count (e.g. Bangladesh 6) was overwritten with
+    // the live count (1), wiping the customer signal. The baseline is captured
+    // once from the pre-Botpress query_count and persisted, so re-applies stay
+    // idempotent and every new inquiry strictly increases the count.
+    const baseline = safeCount(product.baseline_query_count ?? product.query_count);
+    const nextCount = baseline + botpressCount;
+    if (product.baseline_query_count !== undefined && safeCount(product.query_count) === nextCount) {
+      return product;
+    }
 
     changed = true;
     return {
       ...product,
-      query_count: botpressCount,
+      baseline_query_count: baseline,
+      query_count: nextCount,
     };
   });
 
@@ -281,6 +296,7 @@ function summarizeProductForStorage(product: Product) {
       trend_reason: product.trend_reason,
       popularity_score: product.popularity_score,
       query_count: product.query_count,
+      baseline_query_count: product.baseline_query_count,
       events: recentCustomerEvents(product),
       created_at: product.created_at,
       variants: product.variants,

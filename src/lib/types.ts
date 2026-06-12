@@ -84,6 +84,10 @@ export interface Product {
   trend_reason?: string;
   popularity_score?: number;
   query_count?: number;
+  // Captured once from the pre-Botpress (seeded) query_count; live Botpress
+  // inquiry counts ADD to this baseline instead of replacing query_count.
+  // See applyJerseyInquiryCountsToProducts.
+  baseline_query_count?: number;
   created_at: string;
   variants: Variant[];
   events?: CustomerEvent[];
