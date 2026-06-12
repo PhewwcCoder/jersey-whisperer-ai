@@ -126,7 +126,9 @@ function sanitizeProduct(candidate: Partial<Product> & { id?: string }): Product
     events: Array.isArray(candidate.events)
       ? candidate.events.filter(
           (event) =>
-            (event?.type === "query" || event?.type === "confirmed_sale") &&
+            (event?.type === "query" ||
+              event?.type === "confirmed_sale" ||
+              event?.type === "restock") &&
             Number.isFinite(event?.timestamp),
         )
       : undefined,

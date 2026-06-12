@@ -105,12 +105,14 @@ function InventoryPage() {
     if (!product) return false;
     let changed = false;
     let unitsSold = 0;
+    let unitsRestocked = 0;
     const variants = product.variants.map((variant) => {
       if (variant.id !== variantId) return variant;
       const nextQty = Math.max(0, variant.stock_quantity + delta);
       if (nextQty === variant.stock_quantity) return variant;
       changed = true;
       if (nextQty < variant.stock_quantity) unitsSold = variant.stock_quantity - nextQty;
+      else unitsRestocked = nextQty - variant.stock_quantity;
       return {
         ...variant,
         stock_quantity: nextQty,
@@ -118,17 +120,22 @@ function InventoryPage() {
       };
     });
     if (!changed) return false;
-    // Stock going DOWN = units sold. Record a confirmed_sale CustomerEvent so the
-    // DSS reacts live: it feeds Stock Reduction Velocity (14-day sales window)
-    // and flexes the customer weight 0.30 → 0.45, exactly as the methodology
-    // describes. Restocks (plus) intentionally record nothing.
+    // Stock going DOWN = units sold → confirmed_sale event (raises Stock
+    // Reduction Velocity and flexes the customer weight 0.30 → 0.45). Stock
+    // going UP = replenishment → restock event (offsets sold units in the
+    // velocity window, so a filled-up inventory visibly lowers the DSS).
     const events =
       unitsSold > 0
         ? [
             ...(product.events ?? []),
             { type: "confirmed_sale" as const, timestamp: Date.now(), quantity: unitsSold },
           ]
-        : product.events;
+        : unitsRestocked > 0
+          ? [
+              ...(product.events ?? []),
+              { type: "restock" as const, timestamp: Date.now(), quantity: unitsRestocked },
+            ]
+          : product.events;
     updateProduct({ ...product, variants, events });
     return true;
   };

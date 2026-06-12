@@ -1230,7 +1230,7 @@ function ForecastPage() {
             />
             <MethodRow
               title="Stock Reduction Velocity"
-              body="days-of-supply urgency from recent sales rate (14-day target cover)"
+              body="days-of-supply urgency from net recent sales (sales minus restocks, 14-day target cover) — restocking eases the score"
             />
             <MethodRow
               title="Sports News"

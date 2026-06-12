@@ -191,22 +191,30 @@ function computeStockReductionVelocity(product: Product, now: number = Date.now(
 
   const windowStart = now - STOCK_WINDOW_DAYS * 86400000;
   let unitsSold = 0;
+  let unitsRestocked = 0;
   let firstSaleTs = Infinity;
   for (const event of product.events ?? []) {
-    if (event.type !== "confirmed_sale") continue;
     if (event.timestamp < windowStart) continue;
     const qty =
       Number.isFinite(event.quantity) && (event.quantity as number) > 0
         ? (event.quantity as number)
         : 1;
-    unitsSold += qty;
-    if (event.timestamp < firstSaleTs) firstSaleTs = event.timestamp;
+    if (event.type === "confirmed_sale") {
+      unitsSold += qty;
+      if (event.timestamp < firstSaleTs) firstSaleTs = event.timestamp;
+    } else if (event.type === "restock") {
+      // Replenishment offsets depletion: velocity reacts to NET stock movement,
+      // so restocking after a sales burst visibly relaxes the DSS instead of
+      // leaving the urgency stuck at the pre-restock level.
+      unitsRestocked += qty;
+    }
   }
 
+  const netUnitsSold = Math.max(0, unitsSold - unitsRestocked);
   const daysSinceFirstSale =
     firstSaleTs === Infinity ? 0 : (now - firstSaleTs) / 86400000;
   const daysActive = Math.max(1, Math.min(STOCK_WINDOW_DAYS, daysSinceFirstSale));
-  const avgDailySales = unitsSold / daysActive;
+  const avgDailySales = netUnitsSold / daysActive;
   const dos = stock / Math.max(avgDailySales, STOCK_EPSILON);
   return clamp01(1 - dos / DOS_TARGET);
 }

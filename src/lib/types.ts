@@ -55,10 +55,13 @@ export interface Variant {
 }
 
 export interface CustomerEvent {
-  type: "query" | "confirmed_sale";
+  // "restock" = inventory replenishment; it offsets confirmed_sale units inside
+  // the stock-reduction-velocity window (net depletion) and is ignored by the
+  // customer-signal buckets.
+  type: "query" | "confirmed_sale" | "restock";
   timestamp: number;
-  // Event magnitude. For sales this is units; for query events this may be a
-  // distinct-customer count imported from Botpress. Defaults to 1 when unknown.
+  // Event magnitude. For sales/restocks this is units; for query events this may
+  // be a distinct-customer count imported from Botpress. Defaults to 1 when unknown.
   quantity?: number;
 }
 
