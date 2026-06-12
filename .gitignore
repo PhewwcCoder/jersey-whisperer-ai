@@ -47,3 +47,6 @@ dist/
 
 # Local AI tooling config (not part of the app)
 .claude/
+
+# build artifact of scripts/compute-dss.mjs
+scripts/.dss-bundle.mjs
