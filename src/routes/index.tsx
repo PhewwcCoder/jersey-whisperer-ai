@@ -1,15 +1,11 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/AppShell";
 import { forecastProduct } from "@/lib/forecast";
 import { bdt } from "@/lib/inventory-utils";
 import { useStore } from "@/lib/store";
 import { useT } from "@/lib/i18n";
 import { subscribeToTableChanges } from "@/lib/realtime";
-import {
-  applyJerseyInquiryCountsToProducts,
-  fetchJerseyInquiryCounts,
-} from "@/lib/supabase-service";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -77,17 +73,17 @@ function Stat({
 
 function DashboardPage() {
   const t = useT();
-  const { products, setProducts } = useStore();
+  const { products } = useStore();
   // Team name of the most recent live Botpress inquiry — drives the brief green
   // flash + "+1" badge on matching alert rows. Cleared after a short delay.
   const [inquiryFlashTeam, setInquiryFlashTeam] = useState<string | null>(null);
-  const productsRef = useRef(products);
-  productsRef.current = products;
 
-  // Realtime: live inquiry counts (requires Realtime enabled on
-  // public.jersey_inquiry_events — see src/lib/realtime.ts). Demo flow:
-  // Messenger message → Botpress → /api/botpress-inquiry inserts a row →
-  // this subscription fires → counts re-fetch → KPI/alert tiles update live.
+  // Realtime visual cue for live inquiries (requires Realtime enabled on
+  // public.jersey_inquiry_events — see src/lib/realtime.ts). The DATA update
+  // (query_count → DSS customer signal) happens globally in StoreProvider;
+  // this page-level subscription only adds the unmissable toast + row flash.
+  // Demo flow: Messenger message → Botpress → /api/botpress-inquiry inserts a
+  // row → toast appears and count-derived tiles re-render live.
   useEffect(() => {
     let flashTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -110,14 +106,6 @@ function DashboardPage() {
           clearTimeout(flashTimer);
           flashTimer = setTimeout(() => setInquiryFlashTeam(null), 2500);
         }
-
-        // Re-pull aggregated counts and fold them into products so every
-        // count-derived number on this page updates without a refresh.
-        void fetchJerseyInquiryCounts().then((counts) => {
-          if (!counts.length) return;
-          const next = applyJerseyInquiryCountsToProducts(productsRef.current, counts);
-          if (next !== productsRef.current) setProducts(next);
-        });
       },
     );
 
@@ -125,7 +113,6 @@ function DashboardPage() {
       clearTimeout(flashTimer);
       unsubscribe();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const stats = useMemo(() => {

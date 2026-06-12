@@ -120,6 +120,16 @@ function sanitizeProduct(candidate: Partial<Product> & { id?: string }): Product
     trend_reason: candidate.trend_reason ?? "",
     popularity_score: safeNumber(candidate.popularity_score, 60),
     query_count: safeNumber(candidate.query_count, 0),
+    // CustomerEvents (query / confirmed_sale) drive S_customer and stock
+    // reduction velocity in the DSS — dropping them here would reset live
+    // scores on every Supabase refetch.
+    events: Array.isArray(candidate.events)
+      ? candidate.events.filter(
+          (event) =>
+            (event?.type === "query" || event?.type === "confirmed_sale") &&
+            Number.isFinite(event?.timestamp),
+        )
+      : undefined,
     created_at: candidate.created_at ?? new Date().toISOString(),
     variants: Array.isArray(candidate.variants) && candidate.variants.length
       ? candidate.variants
@@ -228,6 +238,19 @@ function readProductsFromBrowserStorage() {
   }
 }
 
+// DSS scoring reads CustomerEvents inside a 14-day window; persist the recent
+// ones (30d, capped) in the type JSON so live score inputs survive a Supabase
+// round-trip (realtime refetch, page reload, other devices).
+const EVENT_RETENTION_DAYS = 30;
+const EVENT_RETENTION_MAX = 100;
+
+function recentCustomerEvents(product: Product) {
+  const cutoff = Date.now() - EVENT_RETENTION_DAYS * 86400000;
+  return (product.events ?? [])
+    .filter((event) => Number.isFinite(event.timestamp) && event.timestamp >= cutoff)
+    .slice(-EVENT_RETENTION_MAX);
+}
+
 function summarizeProductForStorage(product: Product) {
   const variants = safeVariants(product);
   const sizes = variants.map((variant) => variant.size).join(", ");
@@ -256,6 +279,7 @@ function summarizeProductForStorage(product: Product) {
       trend_reason: product.trend_reason,
       popularity_score: product.popularity_score,
       query_count: product.query_count,
+      events: recentCustomerEvents(product),
       created_at: product.created_at,
       variants: product.variants,
     }),

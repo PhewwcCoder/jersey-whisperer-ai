@@ -125,6 +125,43 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Realtime: live customer inquiries (requires Realtime enabled on
+  // public.jersey_inquiry_events). Lives in the store — NOT a single page — so
+  // a Botpress/Messenger inquiry moves query_count (and therefore the DSS
+  // customer signal) on every screen that is open: Dashboard KPIs, Forecast
+  // Preview score table, AI Advisor. The dashboard adds its own toast/flash cue
+  // on top of this data update.
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const unsubscribe = subscribeToTableChanges(
+      "inquiry-counts-changes",
+      "jersey_inquiry_events",
+      (payload) => {
+        if (payload.eventType !== "INSERT") return;
+        clearTimeout(timer);
+        timer = setTimeout(async () => {
+          const inquiryCounts = await fetchJerseyInquiryCounts();
+          if (cancelled || !inquiryCounts.length) return;
+          setProductsState((current) => {
+            const next = applyJerseyInquiryCountsToProducts(current, inquiryCounts);
+            if (next !== current) persistLocalProducts(next);
+            return next;
+          });
+        }, 300);
+      },
+    );
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      unsubscribe();
+    };
+  }, []);
+
   const setProducts = (nextProducts: Product[]) => {
     const clean = sanitize(nextProducts);
     setProductsState(clean);
