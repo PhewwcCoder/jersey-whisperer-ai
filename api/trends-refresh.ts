@@ -12,7 +12,7 @@ const fetch = nodeFetch as unknown as typeof globalThis.fetch;
 import { matchQueryToTeam } from "../src/lib/trend-signals.js";
 // Football-relevance filter for the related-queries DISPLAY boxes (drops cricket/
 // other-sport/noise queries). DISPLAY-DATA ONLY — never touches DSS/trend_signals.
-import { isFootballRelevant } from "../src/lib/football-filter.js";
+import { classifyFootballRelevance } from "../src/lib/football-filter.js";
 
 const SERPAPI_BASE = "https://serpapi.com/search.json";
 
@@ -407,9 +407,10 @@ export async function runTrendsRefresh(params: {
 }): Promise<{ refreshed: RefreshEntry[]; relatedQueries: RelatedQueriesResult }> {
   const { serpApiKey, supabaseUrl, supabaseKey, geo: selectedGeo, teams } = params;
 
-  const refreshed: RefreshEntry[] = [];
-
-  for (const team of teams) {
+  // All teams refresh IN PARALLEL (each team is independent: its own SerpApi calls and
+  // its own per-team Supabase delete+insert). Sequential execution was ~5s × N teams,
+  // which pushed the whole function toward the Vercel maxDuration limit.
+  const refreshTeam = async (team: string): Promise<RefreshEntry> => {
     try {
       const primaryKeyword = `${team.toLowerCase()} jersey`;
       const extraKeyword = TEAM_EXTRA_KEYWORDS[team];
@@ -428,7 +429,7 @@ export async function runTrendsRefresh(params: {
         .filter((s): s is ScoreResult => s !== null);
 
       if (!scores.length) {
-        refreshed.push({
+        return {
           team,
           keyword: primaryKeyword,
           trendScore: 0,
@@ -436,8 +437,7 @@ export async function runTrendsRefresh(params: {
           explanation: "No usable data returned by SerpApi.",
           ok: false,
           error: "No usable timeline data",
-        });
-        continue;
+        };
       }
 
       const best = scores.reduce((a, b) => (b.trendScore01 > a.trendScore01 ? b : a));
@@ -467,21 +467,21 @@ export async function runTrendsRefresh(params: {
         fetched_at: new Date().toISOString(),
       });
 
-      refreshed.push({
+      console.log(
+        `[trends-refresh] ${team}: score=${best.trendScore01.toFixed(3)} (${label}) — "${best.keyword}"`,
+      );
+      return {
         team,
         keyword: best.keyword,
         trendScore: best.trendScore01,
         momentumLabel: label,
         explanation,
         ok: true,
-      });
-      console.log(
-        `[trends-refresh] ${team}: score=${best.trendScore01.toFixed(3)} (${label}) — "${best.keyword}"`,
-      );
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       console.error(`[trends-refresh] Failed for "${team}":`, message);
-      refreshed.push({
+      return {
         team,
         keyword: `${team.toLowerCase()} jersey`,
         trendScore: 0,
@@ -489,9 +489,11 @@ export async function runTrendsRefresh(params: {
         explanation: "",
         ok: false,
         error: message,
-      });
+      };
     }
-  }
+  };
+
+  const refreshed: RefreshEntry[] = await Promise.all(teams.map(refreshTeam));
 
   const relatedQueries: RelatedQueriesResult = {
     top: [],
@@ -520,25 +522,25 @@ export async function runTrendsRefresh(params: {
     const risingBlend = blendByQuery(win24.rising, win7.rising);
     relatedQueries.fallback = { top: topBlend.usedFallback, rising: risingBlend.usedFallback };
 
-    let aiCalls = 0;
-    const filterFootball = async (entries: RelatedEntry[]): Promise<RelatedEntry[]> => {
-      const kept: RelatedEntry[] = [];
-      for (const entry of entries) {
-        try {
-          const verdict = await isFootballRelevant(entry.query);
-          if (verdict.usedAI) aiCalls += 1;
-          if (verdict.relevant) kept.push(entry);
-        } catch (error) {
-          console.error(`[football-filter] classify failed for "${entry.query}":`, error);
-          kept.push(entry);
-        }
-      }
-      return kept;
-    };
-
+    // ONE wall-time-bounded classification pass for ALL queries (Stage-1 keywords, then
+    // a single batched DeepSeek call, then parallel per-query Gemini only as fallback) —
+    // the previous sequential per-query loop could exceed the function maxDuration.
     const totalToClassify = topBlend.entries.length + risingBlend.entries.length;
-    const top = await filterFootball(topBlend.entries);
-    const rising = await filterFootball(risingBlend.entries);
+    let verdicts = new Map<string, { relevant: boolean; usedAI: boolean }>();
+    try {
+      verdicts = await classifyFootballRelevance([
+        ...topBlend.entries.map((e) => e.query),
+        ...risingBlend.entries.map((e) => e.query),
+      ]);
+    } catch (error) {
+      console.error("[football-filter] batch classify failed (keeping all):", error);
+    }
+    const filterFootball = (entries: RelatedEntry[]): RelatedEntry[] =>
+      entries.filter((entry) => verdicts.get(entry.query)?.relevant ?? true);
+
+    const aiCalls = [...verdicts.values()].filter((v) => v.usedAI).length;
+    const top = filterFootball(topBlend.entries);
+    const rising = filterFootball(risingBlend.entries);
     console.log(
       `[football-filter] AI classified ${aiCalls} of ${totalToClassify} queries ` +
         `(kept top ${top.length}/${topBlend.entries.length}, rising ${rising.length}/${risingBlend.entries.length})`,
@@ -649,24 +651,47 @@ export default {
       teams,
     });
 
-    // ── news refresh (non-blocking) ──────────────────────────────────────────
-    // API-Football transfers/fixtures. Separate try/catch so it can't block others.
-    try {
-      const { refreshNewsEvents } = await import("./news-refresh.js");
-      await refreshNewsEvents();
-    } catch (e) {
-      console.error("news-refresh failed (non-blocking):", e);
-    }
+    // ── news refreshes (non-blocking, TIME-BOXED) ─────────────────────────────
+    // API-Football transfers/fixtures + Google AI Mode news. Each stage keeps its own
+    // guard AND a hard wall-clock cap: on a cold cache these can take 30s+ combined,
+    // which used to push the whole function past maxDuration → the Refresh button
+    // appeared dead (504). Trends data is already written by this point; news is a
+    // best-effort bonus, so a timed-out stage is logged and skipped, never fatal.
+    const timeBoxed = async (label: string, run: () => Promise<unknown>, ms: number) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          console.warn(`[trends-refresh] ${label} exceeded ${ms}ms — skipped (non-blocking)`);
+          resolve();
+        }, ms);
+        (timer as unknown as { unref?: () => void }).unref?.();
+      });
+      try {
+        await Promise.race([run(), timeout]);
+      } catch (e) {
+        console.error(`${label} failed (non-blocking):`, e);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
 
-    // ── Google AI Mode football news → Gemini parse (non-blocking, own guard) ──
-    // Own try/catch + internal 20h cache so one "Refresh trends" click updates
-    // trends + transfers + news, and any one failing never blocks the others.
-    try {
-      const { refreshFootballNews } = await import("./football-news-refresh.js");
-      await refreshFootballNews();
-    } catch (e) {
-      console.error("football-news-refresh failed (non-blocking):", e);
-    }
+    await timeBoxed(
+      "news-refresh",
+      async () => {
+        const { refreshNewsEvents } = await import("./news-refresh.js");
+        await refreshNewsEvents();
+      },
+      15000,
+    );
+
+    await timeBoxed(
+      "football-news-refresh",
+      async () => {
+        const { refreshFootballNews } = await import("./football-news-refresh.js");
+        await refreshFootballNews();
+      },
+      15000,
+    );
 
     return jsonResponse({
       ok: true,

@@ -194,11 +194,13 @@ export function classifyByKeyword(query: string): FootballRelevanceResult | null
   return null;
 }
 
-// ── Stage 2: Gemini fallback ──────────────────────────────────────────────────
+// ── Stage 2: DeepSeek (batched, primary) → Gemini (per-query) fallback ────────
 
+const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
 const GEMINI_URL =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 const AI_TIMEOUT_MS = 8000;
+const DEEPSEEK_BATCH_TIMEOUT_MS = 15000;
 
 // Per-process cache so the same ambiguous query is classified by AI only once
 // (covers within-a-refresh dedup and survives warm-lambda reuse across refreshes).
@@ -207,6 +209,76 @@ const aiCache = new Map<string, boolean>();
 function getGeminiKey(): string | undefined {
   if (typeof process === "undefined") return undefined;
   return process.env.GEMINI_API_KEY;
+}
+
+function getDeepSeekKey(): string | undefined {
+  if (typeof process === "undefined") return undefined;
+  return process.env.DEEPSEEK_API_KEY;
+}
+
+interface DeepSeekUpstream {
+  choices?: Array<{ message?: { content?: string } }>;
+  error?: { message?: string };
+}
+
+// ONE batched DeepSeek call for every ambiguous query (vs one Gemini call per query).
+// Returns a map keyed by normalized query, or null when DeepSeek is unavailable/failed
+// so the caller can fall back to per-query Gemini.
+async function classifyBatchWithDeepSeek(queries: string[]): Promise<Map<string, boolean> | null> {
+  const apiKey = getDeepSeekKey();
+  if (!apiKey || !queries.length) return null;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), DEEPSEEK_BATCH_TIMEOUT_MS);
+  try {
+    const prompt = [
+      "For EACH search query decide if it is about a football (soccer) jersey, club, or",
+      "national team. Cricket/basketball/other sports, shops, and random words are false.",
+      'Return ONLY JSON: {"verdicts":[{"query":string,"football":boolean}]}.',
+      "Echo each query back verbatim. Queries:",
+      JSON.stringify(queries),
+    ].join("\n");
+
+    const response = await fetch(DEEPSEEK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: process.env.DEEPSEEK_MODEL?.trim() || "deepseek-chat",
+        messages: [
+          { role: "system", content: "You output only valid JSON, no prose, no markdown fences." },
+          { role: "user", content: prompt },
+        ],
+        temperature: 0,
+        max_tokens: 2048,
+        response_format: { type: "json_object" },
+      }),
+    });
+    if (!response.ok) {
+      console.warn(`[football-filter] DeepSeek batch HTTP ${response.status} → Gemini fallback`);
+      return null;
+    }
+    const payload = (await response.json()) as DeepSeekUpstream;
+    const content = (payload.choices?.[0]?.message?.content ?? "").trim();
+    if (!content) return null;
+    const parsed = JSON.parse(content) as { verdicts?: unknown };
+    const rawList = Array.isArray(parsed.verdicts) ? parsed.verdicts : [];
+    const out = new Map<string, boolean>();
+    for (const raw of rawList) {
+      if (!raw || typeof raw !== "object") continue;
+      const r = raw as Record<string, unknown>;
+      if (typeof r.query !== "string" || typeof r.football !== "boolean") continue;
+      const key = normalizeQuery(r.query);
+      out.set(key, r.football);
+      aiCache.set(key, r.football);
+    }
+    return out;
+  } catch (err) {
+    console.warn("[football-filter] DeepSeek batch failed → Gemini fallback:", err);
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 interface GeminiUpstream {
@@ -272,4 +344,78 @@ export async function isFootballRelevant(query: string): Promise<FootballRelevan
 
   // Gemini unavailable/errored → KEEP, tagged uncertain (do not drop silently).
   return { relevant: true, certain: false, reason: "ai-uncertain", usedAI: ai !== null };
+}
+
+// Batched public API for the refresh pipeline. Same verdict semantics as
+// isFootballRelevant, but wall-time bounded: Stage 1 keyword for everything, then ONE
+// DeepSeek call for all ambiguous queries, then per-query Gemini IN PARALLEL only for
+// what DeepSeek couldn't decide. Returns a map keyed by the RAW query string passed in.
+// Never throws; unresolved queries are kept (relevant:true, certain:false).
+export async function classifyFootballRelevance(
+  queries: string[],
+): Promise<Map<string, FootballRelevanceResult>> {
+  const results = new Map<string, FootballRelevanceResult>();
+  const ambiguous: string[] = [];
+
+  for (const query of queries) {
+    if (results.has(query)) continue;
+    const keyword = classifyByKeyword(query);
+    if (keyword) {
+      results.set(query, keyword);
+      continue;
+    }
+    const cached = aiCache.get(normalizeQuery(query));
+    if (cached !== undefined) {
+      results.set(query, {
+        relevant: cached,
+        certain: true,
+        reason: cached ? "ai-yes" : "ai-no",
+        usedAI: true,
+      });
+      continue;
+    }
+    ambiguous.push(query);
+  }
+
+  if (!ambiguous.length) return results;
+
+  // Primary: one batched DeepSeek call for everything ambiguous.
+  const batch = await classifyBatchWithDeepSeek(ambiguous);
+  const leftover: string[] = [];
+  for (const query of ambiguous) {
+    const verdict = batch?.get(normalizeQuery(query));
+    if (verdict === undefined) {
+      leftover.push(query);
+      continue;
+    }
+    results.set(query, {
+      relevant: verdict,
+      certain: true,
+      reason: verdict ? "ai-yes" : "ai-no",
+      usedAI: true,
+    });
+  }
+
+  // Fallback: per-query Gemini, in parallel (each call has its own 8s timeout).
+  if (leftover.length) {
+    const verdicts = await Promise.all(leftover.map((query) => classifyWithGemini(query)));
+    leftover.forEach((query, i) => {
+      const ai = verdicts[i];
+      if (ai === true) {
+        results.set(query, { relevant: true, certain: true, reason: "ai-yes", usedAI: true });
+      } else if (ai === false) {
+        results.set(query, { relevant: false, certain: true, reason: "ai-no", usedAI: true });
+      } else {
+        // Both providers unavailable → KEEP, tagged uncertain (do not drop silently).
+        results.set(query, {
+          relevant: true,
+          certain: false,
+          reason: "ai-uncertain",
+          usedAI: ai !== null,
+        });
+      }
+    });
+  }
+
+  return results;
 }

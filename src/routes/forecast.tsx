@@ -1511,6 +1511,13 @@ function StockPicksList({
       <div className="space-y-1">
         {items.map((item) => {
           const stocked = queryMatchesInventory(item.query, inventoryText);
+          // Primary label = the AI-resolved country/club name (e.g. "Argentina",
+          // "Al Nassr"); the raw search query drops to a subtitle. Falls back to the
+          // query when no team was resolved (rule-filter mode / unmatched query).
+          const teamLabel =
+            item.team && item.team.trim().toLowerCase() !== item.query.trim().toLowerCase()
+              ? item.team.trim()
+              : null;
           return (
             <div
               key={`pick-${item.query}`}
@@ -1523,7 +1530,14 @@ function StockPicksList({
               />
               <div className="relative flex items-center justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="truncate text-[13px] text-foreground/90">{item.query}</div>
+                  <div className="truncate text-[13px] font-medium text-foreground/90">
+                    {teamLabel ?? item.query}
+                  </div>
+                  {teamLabel && (
+                    <div className="truncate text-[10px] text-muted-foreground/80">
+                      {item.query}
+                    </div>
+                  )}
                   {!stocked && (
                     <div className="flex items-center gap-1 text-[10px] font-medium text-success">
                       <span className="h-1 w-1 rounded-full bg-success" aria-hidden />
